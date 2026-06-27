@@ -60,6 +60,11 @@ DEFAULTS = {
     "night_to_clock": False,           # switch to clock-only during night window
     "clock_date": True,                # show date on the clock-only screen
     "date_format": "month_day_year",   # see DATE_FORMATS below
+    "auto_fallback": True,             # if the chosen source fails, try OpenSky
+    "highlight_special": True,         # flag emergency-squawk / military flights
+    "fav_airlines": "",               # comma IATA/ICAO codes; if set, show only these
+    "fav_types": "",                  # comma aircraft types; if set, show only these
+    "show_weather": False,            # show local weather on the clock screen
 }
 
 _settings = dict(DEFAULTS)
@@ -73,6 +78,8 @@ _last_error = ""
 _device_ip = ""
 _device_last = 0      # when the ESP32 last fetched /flights
 _version = 1          # bumps on every settings change or data refresh (for instant ESP polling)
+_active_source = ""   # the source actually used last (may differ if fallback kicked in)
+_weather = {"txt": "", "exp": 0}
 _logo_cache = {}
 _airport_cache = {}
 _route_cache = {}
@@ -359,8 +366,15 @@ def adsbdb_route(cs):
     cs = (cs or "").strip()
     if len(cs) < 3:
         return {}
-    if cs in _route_cache:
-        return _route_cache[cs]
+    now = time.time()
+    cached = _route_cache.get(cs)
+    if cached and now < cached[0]:
+        return cached[1]
+    # Only airline-style callsigns (3 letters + digits) have scheduled routes;
+    # looking up GA/private callsigns returns unreliable or wrong data.
+    if not is_airline_callsign(cs):
+        _route_cache[cs] = (now + 3600, {})
+        return {}
     r = {}
     try:
         url = "https://api.adsbdb.com/v0/callsign/" + urllib.parse.quote(cs)
@@ -379,7 +393,8 @@ def adsbdb_route(cs):
             }
     except Exception:
         r = {}
-    _route_cache[cs] = r
+    # cache good routes for 2h, empty/failed lookups for 10min (so they retry)
+    _route_cache[cs] = (now + (7200 if r else 600), r)
     return r
 
 
@@ -402,6 +417,7 @@ def opensky_nearby():
             "oc": rt.get("oc", ""), "ocity": rt.get("ocity", ""),
             "dc": rt.get("dc", ""), "dcity": rt.get("dcity", ""),
             "type": "", "aiata": rt.get("aiata", ""),
+            "squawk": (st[14] if len(st) > 14 else ""),
         })
     return recs
 
@@ -411,13 +427,14 @@ def opensky_tracked():
     if not flt:
         raise RuntimeError("No flight set to track")
     j = opensky_states()
-    match = None
-    for st in (j.get("states") or []):
-        if (st[1] or "").strip().upper() == flt:
-            match = st
-            break
-    if not match:
+    matches = [st for st in (j.get("states") or [])
+               if (st[1] or "").strip().upper() == flt]
+    if not matches:
         return []
+    # Prefer an airborne entry with a valid position over grounded/stale duplicates.
+    good = [st for st in matches
+            if not st[8] and st[5] is not None and st[6] is not None]
+    match = (good or matches)[0]
     cs = (match[1] or "").strip()
     flat, flon = match[6], match[5]
     rt = adsbdb_route(cs)
@@ -436,6 +453,7 @@ def opensky_tracked():
         "oc": rt.get("oc", ""), "ocity": rt.get("ocity", ""),
         "dc": rt.get("dc", ""), "dcity": rt.get("dcity", ""),
         "type": "", "aiata": rt.get("aiata", ""),
+        "squawk": (match[14] if len(match) > 14 else ""),
         "progress": progress, "eta": -1,
     }]
 
@@ -532,20 +550,43 @@ def place(rec, which):
     return code
 
 
+MIL_PREFIXES = {"RCH", "RRR", "CFC", "CNV", "IAM", "BAF", "ASY", "GAF", "NATO", "FORTE", "HOMER"}
+
+
+def _csv_set(key):
+    return {x.strip().upper() for x in get(key).split(",") if x.strip()}
+
+
 def finalize(recs, track=False):
     clat, clon = get("center_lat"), get("center_lon")
+    favA, favT = _csv_set("fav_airlines"), _csv_set("fav_types")
+    hl_on = get("highlight_special")
     out = []
     for r in recs:
-        if get("airline_only") and not is_airline_callsign(r.get("cs", "")):
+        cs = r.get("cs", "")
+        if get("airline_only") and not is_airline_callsign(cs):
+            continue
+        aiata = (r.get("aiata") or "").upper()
+        apre = airline_code(cs)
+        if favA and not (aiata in favA or apre in favA):
+            continue
+        typ = (r.get("type") or "").upper()
+        if favT and typ and typ not in favT:
             continue
         flat, flon = r.get("lat"), r.get("lon")
         item = {
-            "cs": r.get("cs", ""), "alt": r.get("alt", 0), "spd": r.get("spd", 0),
+            "cs": cs, "alt": r.get("alt", 0), "spd": r.get("spd", 0),
             "trk": r.get("trk", 0), "vr": r.get("vr", 0),
             "dist": round(haversine(clat, clon, flat, flon)) if flat is not None else 0,
             "from": place(r, "o"), "to": place(r, "d"),
             "type": r.get("type", ""), "logo": fetch_logo(r.get("aiata", "")),
         }
+        if hl_on:
+            sq = str(r.get("squawk") or "")
+            if sq in ("7500", "7600", "7700"):
+                item["hl"] = "EMERGENCY"
+            elif apre in MIL_PREFIXES:
+                item["hl"] = "MILITARY"
         if track:
             item["progress"] = r.get("progress", 0)
             item["eta"] = r.get("eta", -1)
@@ -559,14 +600,52 @@ def finalize(recs, track=False):
     return out
 
 
+WEATHER_CODES = {0: "Clear", 1: "Clear", 2: "Cloudy", 3: "Overcast", 45: "Fog", 48: "Fog",
+                 51: "Drizzle", 53: "Drizzle", 55: "Drizzle", 61: "Rain", 63: "Rain",
+                 65: "Heavy Rain", 71: "Snow", 73: "Snow", 75: "Snow", 80: "Showers",
+                 81: "Showers", 82: "Showers", 95: "Storm", 96: "Storm", 99: "Storm"}
+
+
+def get_weather():
+    if not get("show_weather"):
+        return ""
+    if time.time() < _weather["exp"]:
+        return _weather["txt"]
+    try:
+        lat, lon = get("center_lat"), get("center_lon")
+        url = (f"https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}"
+               "&current=temperature_2m,weather_code&temperature_unit=fahrenheit")
+        with urllib.request.urlopen(url, timeout=15) as r:
+            j = json.load(r)
+        cur = j.get("current") or {}
+        t = round(cur.get("temperature_2m", 0))
+        desc = WEATHER_CODES.get(cur.get("weather_code"), "")
+        _weather["txt"] = f"{t}F {desc}".strip()
+    except Exception:
+        _weather["txt"] = ""
+    _weather["exp"] = time.time() + 900      # refresh every 15 min
+    return _weather["txt"]
+
+
 def fetch_data():
-    src = get("data_source")
+    global _active_source
     mode = effective_mode()
     if mode == "clock":
-        return []                       # clock-only screen: no flight API calls
-    if mode == "track":
-        return finalize(TRACKED.get(src, fr24_tracked)(), track=True)
-    return finalize(NEARBY.get(src, fr24_nearby)())
+        _active_source = get("data_source")
+        return []
+    src = get("data_source")
+    table = TRACKED if mode == "track" else NEARBY
+    try:
+        res = finalize(table.get(src, fr24_nearby)(), track=(mode == "track"))
+        _active_source = src
+        return res
+    except Exception:
+        # auto-fallback to the free OpenSky source if the chosen one fails
+        if get("auto_fallback") and src != "opensky":
+            res = finalize(table["opensky"](), track=(mode == "track"))
+            _active_source = "opensky*"
+            return res
+        raise
 
 
 def refresh_loop():
@@ -662,7 +741,8 @@ def config_obj():
             "border": bool(get("show_border")), "logos": bool(get("show_logos")),
             "logo_px": int(get("logo_px")), "mode": effective_mode(),
             "clock": bool(get("show_clock")), "clock24": bool(get("clock24h")),
-            "rainbow": bool(get("rainbow")), "date": date_str}
+            "rainbow": bool(get("rainbow")), "date": date_str,
+            "weather": get_weather()}
 
 
 # ---------------- web ----------------
@@ -745,6 +825,11 @@ hr{border:0;border-top:1px solid var(--line);margin:16px 0}
       <option value=city>City name (Los Angeles)</option>
       <option value=code>Airport code (LAX)</option></select></div>
     <div class=field><label style="display:flex;align-items:center;gap:8px"><input id=airline_only type=checkbox style="width:auto"> Hide private / GA flights</label></div>
+    <div class=field><label style="display:flex;align-items:center;gap:8px"><input id=auto_fallback type=checkbox style="width:auto"> Auto-fallback to OpenSky if source fails</label></div>
+    <div class=field><label style="display:flex;align-items:center;gap:8px"><input id=highlight_special type=checkbox style="width:auto"> Highlight emergency / military flights</label></div>
+    <div class=field><label style="display:flex;align-items:center;gap:8px"><input id=show_weather type=checkbox style="width:auto"> Show weather on clock screen</label></div>
+    <div class=field><label>Only these airlines (codes, comma-separated; blank = all)</label><input id=fav_airlines placeholder="e.g. UA, AAL, DL"></div>
+    <div class=field><label>Only these aircraft types (blank = all)</label><input id=fav_types placeholder="e.g. B738, A320"></div>
     <div class=field><label style="display:flex;align-items:center;gap:8px"><input id=show_clock type=checkbox style="width:auto"> Show clock (top-left)</label></div>
     <div class=field><label style="display:flex;align-items:center;gap:8px"><input id=clock24h type=checkbox style="width:auto"> 24-hour clock</label></div>
     <div class=field><label style="display:flex;align-items:center;gap:8px"><input id=rainbow type=checkbox style="width:auto"> Rainbow color cycle</label></div>
@@ -774,9 +859,9 @@ hr{border:0;border-top:1px solid var(--line);margin:16px 0}
 <div class=toast id=toast>Saved</div>
 <script>
 const $=id=>document.getElementById(id);
-const FIELDS=["data_source","fr24_token","opensky_client_id","opensky_client_secret","flightaware_api_key","mode","track_flight","center_lat","center_lon","radius_km","max_aircraft","refresh_sec","place_style","airline_only","show_clock","clock24h","rainbow","night_mode","night_start","night_end","night_brightness","night_to_clock","clock_date","date_format","text_color","brightness","show_border","show_logos","logo_px"];
+const FIELDS=["data_source","fr24_token","opensky_client_id","opensky_client_secret","flightaware_api_key","mode","track_flight","center_lat","center_lon","radius_km","max_aircraft","refresh_sec","place_style","airline_only","auto_fallback","highlight_special","show_weather","fav_airlines","fav_types","show_clock","clock24h","rainbow","night_mode","night_start","night_end","night_brightness","night_to_clock","clock_date","date_format","text_color","brightness","show_border","show_logos","logo_px"];
 const NUM=["center_lat","center_lon","radius_km","max_aircraft","refresh_sec","brightness","logo_px","night_brightness"];
-const BOOL=["airline_only","show_clock","clock24h","rainbow","night_mode","night_to_clock","clock_date","show_border","show_logos"];
+const BOOL=["airline_only","auto_fallback","highlight_special","show_weather","show_clock","clock24h","rainbow","night_mode","night_to_clock","clock_date","show_border","show_logos"];
 const CREDS=["fr24_token","opensky_client_id","opensky_client_secret","flightaware_api_key"];
 function syncRows(){
   const src=$('data_source').value;
@@ -920,6 +1005,7 @@ class Handler(BaseHTTPRequestHandler):
                     "have_pil": HAVE_PIL, "logo_count": logo_count,
                     "logos_on": bool(get("show_logos")), "mode": get("mode"),
                     "source": get("data_source"), "device_ip": _device_ip,
+                    "active_source": _active_source, "weather": _weather["txt"],
                     "device_last": _device_last, "device_online": device_online,
                     "server_ok": server_ok,
                 })
