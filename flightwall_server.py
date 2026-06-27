@@ -65,6 +65,7 @@ DEFAULTS = {
     "fav_airlines": "",               # comma IATA/ICAO codes; if set, show only these
     "fav_types": "",                  # comma aircraft types; if set, show only these
     "show_weather": False,            # show local weather on the clock screen
+    "world_zones": "America/Los_Angeles,America/New_York,Europe/London,Asia/Tokyo",
 }
 
 _settings = dict(DEFAULTS)
@@ -630,7 +631,7 @@ def get_weather():
 def fetch_data():
     global _active_source
     mode = effective_mode()
-    if mode == "clock":
+    if mode in ("clock", "world", "world4"):
         _active_source = get("data_source")
         return []
     src = get("data_source")
@@ -709,6 +710,82 @@ DATE_FORMATS = [
 ]
 
 
+try:
+    from zoneinfo import ZoneInfo
+    HAVE_TZ = True
+except Exception:
+    HAVE_TZ = False
+
+# Full list the UI offers: (zone id, abbreviation, city label). Spans every offset.
+WORLD_ZONES = [
+    ("Pacific/Midway", "MIT", "Midway"),
+    ("Pacific/Honolulu", "HNL", "Honolulu"),
+    ("America/Anchorage", "ANC", "Anchorage"),
+    ("America/Los_Angeles", "LAX", "Los Angeles"),
+    ("America/Phoenix", "PHX", "Phoenix"),
+    ("America/Denver", "DEN", "Denver"),
+    ("America/Chicago", "CHI", "Chicago"),
+    ("America/New_York", "NYC", "New York"),
+    ("America/Toronto", "YYZ", "Toronto"),
+    ("America/Mexico_City", "MEX", "Mexico City"),
+    ("America/Bogota", "BOG", "Bogota"),
+    ("America/Sao_Paulo", "SAO", "Sao Paulo"),
+    ("America/Argentina/Buenos_Aires", "BUE", "Buenos Aires"),
+    ("Atlantic/Reykjavik", "REK", "Reykjavik"),
+    ("Europe/London", "LON", "London"),
+    ("Europe/Lisbon", "LIS", "Lisbon"),
+    ("Europe/Paris", "PAR", "Paris"),
+    ("Europe/Madrid", "MAD", "Madrid"),
+    ("Europe/Berlin", "BER", "Berlin"),
+    ("Europe/Rome", "ROM", "Rome"),
+    ("Europe/Amsterdam", "AMS", "Amsterdam"),
+    ("Europe/Athens", "ATH", "Athens"),
+    ("Europe/Istanbul", "IST", "Istanbul"),
+    ("Europe/Moscow", "MOW", "Moscow"),
+    ("Africa/Lagos", "LOS", "Lagos"),
+    ("Africa/Cairo", "CAI", "Cairo"),
+    ("Africa/Johannesburg", "JNB", "Johannesburg"),
+    ("Africa/Nairobi", "NBO", "Nairobi"),
+    ("Asia/Jerusalem", "JLM", "Jerusalem"),
+    ("Asia/Riyadh", "RUH", "Riyadh"),
+    ("Asia/Dubai", "DXB", "Dubai"),
+    ("Asia/Tehran", "THR", "Tehran"),
+    ("Asia/Karachi", "KHI", "Karachi"),
+    ("Asia/Kolkata", "DEL", "India"),
+    ("Asia/Dhaka", "DAC", "Dhaka"),
+    ("Asia/Bangkok", "BKK", "Bangkok"),
+    ("Asia/Jakarta", "JKT", "Jakarta"),
+    ("Asia/Singapore", "SIN", "Singapore"),
+    ("Asia/Hong_Kong", "HKG", "Hong Kong"),
+    ("Asia/Shanghai", "SHA", "Shanghai"),
+    ("Asia/Manila", "MNL", "Manila"),
+    ("Asia/Seoul", "SEL", "Seoul"),
+    ("Asia/Tokyo", "TYO", "Tokyo"),
+    ("Australia/Perth", "PER", "Perth"),
+    ("Australia/Adelaide", "ADL", "Adelaide"),
+    ("Australia/Sydney", "SYD", "Sydney"),
+    ("Pacific/Auckland", "AKL", "Auckland"),
+]
+ZONE_AB = {z: ab for z, ab, _ in WORLD_ZONES}
+
+
+def world_times():
+    """For each selected zone, return its abbreviation and current UTC offset
+    (minutes, DST-aware). The ESP32 ticks the actual time locally from this."""
+    if not HAVE_TZ:
+        return []
+    out = []
+    for zid in [z.strip() for z in get("world_zones").split(",") if z.strip()]:
+        try:
+            now = datetime.datetime.now(ZoneInfo(zid))
+            off = int(now.utcoffset().total_seconds() // 60)
+        except Exception:
+            continue
+        ab = ZONE_AB.get(zid, zid.split("/")[-1][:3].upper())
+        out.append({"ab": ab, "off": off})
+    return out[:8]
+
+
 def format_date(fmt):
     now = datetime.datetime.now()
     mon, monb = now.strftime("%B"), now.strftime("%b")
@@ -737,12 +814,14 @@ def config_obj():
     except Exception:
         r, g, b = 255, 140, 0
     date_str = format_date(get("date_format")) if get("clock_date") else ""
+    m = effective_mode()
+    zones = world_times() if m in ("world", "world4") else []
     return {"color": [r, g, b], "brightness": effective_brightness(),
             "border": bool(get("show_border")), "logos": bool(get("show_logos")),
-            "logo_px": int(get("logo_px")), "mode": effective_mode(),
+            "logo_px": int(get("logo_px")), "mode": m,
             "clock": bool(get("show_clock")), "clock24": bool(get("clock24h")),
             "rainbow": bool(get("rainbow")), "date": date_str,
-            "weather": get_weather()}
+            "weather": get_weather(), "zones": zones}
 
 
 # ---------------- web ----------------
@@ -809,7 +888,9 @@ hr{border:0;border-top:1px solid var(--line);margin:16px 0}
     <div class=field><label>Mode</label><select id=mode>
       <option value=nearby>Nearby - cycle local flights</option>
       <option value=track>Track - follow one flight</option>
-      <option value=clock>Clock only - big clock, no flights</option></select></div>
+      <option value=clock>Clock only - big clock, no flights</option>
+      <option value=world>World clock - cycle timezones</option>
+      <option value=world4>World clock x4 - 4 zones at once</option></select></div>
     <div class=field id=trackrow><label>Flight to track (callsign or number)</label><input id=track_flight placeholder="e.g. UAL123"></div>
     <hr>
     <div class=row2>
@@ -843,6 +924,9 @@ hr{border:0;border-top:1px solid var(--line);margin:16px 0}
     <hr>
     <div class=field><label style="display:flex;align-items:center;gap:8px"><input id=clock_date type=checkbox style="width:auto"> Show date on clock screen</label></div>
     <div class=field><label>Date format</label><select id=date_format>__DATEOPTS__</select></div>
+    <div class=field><label>World clock zones (for World modes; pick several)</label>
+      <select id=world_zones multiple size=8 style="height:auto">__ZONEOPTS__</select>
+      <div class=note>Cmd/Ctrl-click to select multiple. World x4 uses the first 4.</div></div>
     <hr>
     <div class=row2>
       <div class=field><label>Text color</label><input id=text_color type=color style="height:42px;padding:4px"></div>
@@ -872,6 +956,7 @@ async function loadSettings(){
   const s=await (await fetch('/api/settings')).json();
   FIELDS.forEach(k=>{ const el=$(k); if(!el) return; if(BOOL.includes(k)) el.checked=!!s[k]; else el.value=s[k]; });
   CREDS.forEach(k=>{ const el=$(k); if(el){ el.value=''; el.placeholder = s[k+'_set'] ? 'saved - leave blank to keep' : 'not set'; }});
+  const wz=$('world_zones'); if(wz){ const sel=(s.world_zones||'').split(',').map(x=>x.trim()); for(const o of wz.options) o.selected=sel.includes(o.value); }
   syncRows();
 }
 $('data_source').addEventListener('change',syncRows);
@@ -880,6 +965,7 @@ async function save(){
   const body={};
   FIELDS.forEach(k=>{ const el=$(k); if(!el) return; let v=BOOL.includes(k)?el.checked:el.value; if(NUM.includes(k)) v=parseFloat(v); body[k]=v; });
   CREDS.forEach(k=>{ if(body[k]==='') delete body[k]; });   // blank = keep saved key
+  const wz=$('world_zones'); if(wz){ body.world_zones=[...wz.selectedOptions].map(o=>o.value).join(','); }
   await fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
   const t=$('toast'); t.classList.add('show'); setTimeout(()=>t.classList.remove('show'),1400);
   loadSettings(); refresh();
@@ -1031,7 +1117,9 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(200, "image/svg+xml", ICON_SVG)
         elif path == "/":
             opts = "".join(f'<option value="{k}">{lbl}</option>' for k, lbl in DATE_FORMATS)
-            self._send(200, "text/html; charset=utf-8", DASHBOARD.replace("__DATEOPTS__", opts))
+            zopts = "".join(f'<option value="{z}">{lbl} ({ab})</option>' for z, ab, lbl in WORLD_ZONES)
+            html = DASHBOARD.replace("__DATEOPTS__", opts).replace("__ZONEOPTS__", zopts)
+            self._send(200, "text/html; charset=utf-8", html)
         else:
             self._send(404, "text/plain", "not found")
 
