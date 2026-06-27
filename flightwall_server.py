@@ -51,7 +51,7 @@ DEFAULTS = {
     "mode": "nearby",                  # nearby | track
     "track_flight": "",
     "show_clock": True,                # show the top-left clock on the panel
-    "clock_24h": False,                # 24-hour vs 12-hour clock
+    "clock24h": False,                # 24-hour vs 12-hour clock
     "rainbow": False,                  # cycle the text through rainbow colors
     "night_mode": False,               # auto-dim during night hours
     "night_start": "22:00",            # HH:MM local
@@ -661,7 +661,7 @@ def config_obj():
     return {"color": [r, g, b], "brightness": effective_brightness(),
             "border": bool(get("show_border")), "logos": bool(get("show_logos")),
             "logo_px": int(get("logo_px")), "mode": effective_mode(),
-            "clock": bool(get("show_clock")), "clock24": bool(get("clock_24h")),
+            "clock": bool(get("show_clock")), "clock24": bool(get("clock24h")),
             "rainbow": bool(get("rainbow")), "date": date_str}
 
 
@@ -746,7 +746,7 @@ hr{border:0;border-top:1px solid var(--line);margin:16px 0}
       <option value=code>Airport code (LAX)</option></select></div>
     <div class=field><label style="display:flex;align-items:center;gap:8px"><input id=airline_only type=checkbox style="width:auto"> Hide private / GA flights</label></div>
     <div class=field><label style="display:flex;align-items:center;gap:8px"><input id=show_clock type=checkbox style="width:auto"> Show clock (top-left)</label></div>
-    <div class=field><label style="display:flex;align-items:center;gap:8px"><input id=clock_24h type=checkbox style="width:auto"> 24-hour clock</label></div>
+    <div class=field><label style="display:flex;align-items:center;gap:8px"><input id=clock24h type=checkbox style="width:auto"> 24-hour clock</label></div>
     <div class=field><label style="display:flex;align-items:center;gap:8px"><input id=rainbow type=checkbox style="width:auto"> Rainbow color cycle</label></div>
     <div class=field><label style="display:flex;align-items:center;gap:8px"><input id=night_mode type=checkbox style="width:auto"> Night mode (auto-dim)</label></div>
     <div class=row2>
@@ -774,9 +774,9 @@ hr{border:0;border-top:1px solid var(--line);margin:16px 0}
 <div class=toast id=toast>Saved</div>
 <script>
 const $=id=>document.getElementById(id);
-const FIELDS=["data_source","fr24_token","opensky_client_id","opensky_client_secret","flightaware_api_key","mode","track_flight","center_lat","center_lon","radius_km","max_aircraft","refresh_sec","place_style","airline_only","show_clock","clock_24h","rainbow","night_mode","night_start","night_end","night_brightness","night_to_clock","clock_date","date_format","text_color","brightness","show_border","show_logos","logo_px"];
+const FIELDS=["data_source","fr24_token","opensky_client_id","opensky_client_secret","flightaware_api_key","mode","track_flight","center_lat","center_lon","radius_km","max_aircraft","refresh_sec","place_style","airline_only","show_clock","clock24h","rainbow","night_mode","night_start","night_end","night_brightness","night_to_clock","clock_date","date_format","text_color","brightness","show_border","show_logos","logo_px"];
 const NUM=["center_lat","center_lon","radius_km","max_aircraft","refresh_sec","brightness","logo_px","night_brightness"];
-const BOOL=["airline_only","show_clock","clock_24h","rainbow","night_mode","night_to_clock","clock_date","show_border","show_logos"];
+const BOOL=["airline_only","show_clock","clock24h","rainbow","night_mode","night_to_clock","clock_date","show_border","show_logos"];
 const CREDS=["fr24_token","opensky_client_id","opensky_client_secret","flightaware_api_key"];
 function syncRows(){
   const src=$('data_source').value;
