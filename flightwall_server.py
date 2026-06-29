@@ -47,7 +47,7 @@ DEFAULTS = {
     "brightness": 90,
     "show_border": False,
     "show_logos": True,
-    "logo_px": 20,
+    "logo_px": 40,
     "mode": "nearby",                  # nearby | track
     "track_flight": "",
     "show_clock": True,                # show the top-left clock on the panel
@@ -1336,7 +1336,7 @@ hr{border:0;border-top:1px solid var(--line);margin:16px 0}
     <label class=chk><input id=show_border type=checkbox><span>Border around screen</span></label>
     <label class=chk><input id=show_logos type=checkbox><span>Airline logos</span></label>
     <div class=note id=logohint></div>
-    <div class=field style="margin-top:10px"><label>Logo size (px)</label><input id=logo_px type=number min=12 max=32></div>
+    <div class=field style="margin-top:10px"><label>Logo size (px)</label><input id=logo_px type=number min=12 max=48></div>
   </div>
   <div class=card><h2>Night mode</h2>
     <label class=chk><input id=night_mode type=checkbox><span>Auto-dim at night</span></label>
