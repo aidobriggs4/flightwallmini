@@ -962,128 +962,199 @@ DASHBOARD = """<!doctype html><html lang=en><head><meta charset=utf-8>
 <meta name=apple-mobile-web-app-title content="FlightWall">
 <link rel=apple-touch-icon href="/icon.png">
 <style>
-:root{--bg:#0c0e12;--card:#161a21;--line:#262c36;--ink:#e7ecf3;--mut:#8b94a3;--acc:#ff8c00;--ok:#37d07a}
-*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.5 system-ui,sans-serif}
-.wrap{max-width:1000px;margin:0 auto;padding:22px}
-h1{font-size:20px;margin:0;display:flex;align-items:center;gap:10px}
-.dot{width:9px;height:9px;border-radius:50%;background:var(--mut)}.dot.on{background:var(--ok);box-shadow:0 0 8px var(--ok)}
-.sub{color:var(--mut);font-size:13px;margin-top:3px}
-.grid{display:grid;grid-template-columns:1.3fr 1fr;gap:18px;margin-top:20px}
-@media(max-width:820px){.grid{grid-template-columns:1fr}}
-.card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:18px}
-.card h2{font-size:13px;text-transform:uppercase;letter-spacing:.08em;color:var(--mut);margin:0 0 14px}
+:root{--bg:#0c0e12;--card:#161a21;--line:#262c36;--ink:#e7ecf3;--mut:#8b94a3;--acc:#ff8c00;--ok:#37d07a;--bad:#ff5d5d}
+*{box-sizing:border-box}
+body{margin:0;background:radial-gradient(1200px 600px at 50% -10%,#141925 0,var(--bg) 60%);color:var(--ink);font:15px/1.5 -apple-system,system-ui,sans-serif;padding-bottom:90px}
+.wrap{max-width:760px;margin:0 auto;padding:20px 16px}
+.head{display:flex;align-items:center;gap:11px}
+.logo{width:34px;height:34px;border-radius:9px;background:linear-gradient(135deg,var(--acc),#ff5e00);display:flex;align-items:center;justify-content:center;font-size:18px}
+h1{font-size:19px;margin:0;font-weight:700}
+.dot{width:9px;height:9px;border-radius:50%;background:var(--mut);display:inline-block;margin-right:5px}
+.dot.on{background:var(--ok);box-shadow:0 0 8px var(--ok)}
+.sub{color:var(--mut);font-size:13px;margin-top:4px}
+.tabs{display:flex;gap:6px;overflow-x:auto;margin:18px 0 16px;padding-bottom:4px;-webkit-overflow-scrolling:touch}
+.tab{flex:0 0 auto;background:var(--card);border:1px solid var(--line);color:var(--mut);border-radius:11px;padding:9px 15px;font-size:13px;font-weight:600;cursor:pointer;white-space:nowrap;transition:.15s}
+.tab.on{background:var(--acc);border-color:var(--acc);color:#1a1206}
+.card{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:18px;margin-bottom:14px}
+.card h2{font-size:12px;text-transform:uppercase;letter-spacing:.09em;color:var(--mut);margin:0 0 14px;font-weight:700}
 table{width:100%;border-collapse:collapse;font-size:14px}
-th{text-align:left;color:var(--mut);font-weight:600;font-size:12px;padding:6px 8px;border-bottom:1px solid var(--line)}
-td{padding:7px 8px;border-bottom:1px solid var(--line)}tr:last-child td{border:0}
-.cs{font-weight:600;color:var(--acc)}.mut{color:var(--mut)}
-.field{margin-bottom:13px}label{display:block;font-size:12px;color:var(--mut);margin-bottom:5px}
-input,select{width:100%;background:#0e1217;border:1px solid var(--line);color:var(--ink);border-radius:8px;padding:9px 10px;font:inherit}
+th{text-align:left;color:var(--mut);font-weight:600;font-size:11px;text-transform:uppercase;letter-spacing:.05em;padding:6px 8px;border-bottom:1px solid var(--line)}
+td{padding:8px}tr:not(:last-child) td{border-bottom:1px solid var(--line)}
+.cs{font-weight:700;color:var(--acc)}.mut{color:var(--mut)}
+.field{margin-bottom:13px}label{display:block;font-size:12px;color:var(--mut);margin-bottom:6px}
+input,select{width:100%;background:#0e1217;border:1px solid var(--line);color:var(--ink);border-radius:9px;padding:10px 11px;font:inherit}
+input:focus,select:focus{outline:none;border-color:var(--acc)}
 .row2{display:grid;grid-template-columns:1fr 1fr;gap:10px}
-button{background:var(--acc);color:#1a1206;border:0;border-radius:9px;padding:11px 16px;font-weight:700;cursor:pointer;width:100%;margin-top:4px}
+.chk{display:flex;align-items:center;gap:10px;padding:9px 0;cursor:pointer}
+.chk input{width:20px;height:20px;accent-color:var(--acc);flex:0 0 auto}
+.chk span{font-size:14px;color:var(--ink)}
+.opts{display:grid;grid-template-columns:1fr 1fr;gap:4px 16px}
+button{background:var(--acc);color:#1a1206;border:0;border-radius:11px;padding:12px 16px;font-weight:700;font-size:15px;cursor:pointer;width:100%}
+button.ghost{background:#0e1217;color:var(--ink);border:1px solid var(--line)}
 button:active{transform:translateY(1px)}
 .note{font-size:12px;color:var(--mut);margin-top:8px}
-.toast{position:fixed;bottom:20px;left:50%;transform:translateX(-50%);background:var(--ok);color:#04240f;padding:10px 18px;border-radius:10px;font-weight:700;opacity:0;transition:.25s;pointer-events:none}
+.savebar{position:fixed;left:0;right:0;bottom:0;background:rgba(12,14,18,.92);backdrop-filter:blur(10px);border-top:1px solid var(--line);padding:12px 16px;z-index:20}
+.savebar .inner{max-width:760px;margin:0 auto}
+.toast{position:fixed;bottom:84px;left:50%;transform:translateX(-50%);background:var(--ok);color:#04240f;padding:11px 20px;border-radius:11px;font-weight:700;opacity:0;transition:.25s;pointer-events:none;z-index:30}
 .toast.show{opacity:1}
-.empty{color:var(--mut);text-align:center;padding:24px 0}
+.empty{color:var(--mut);text-align:center;padding:26px 0}
 hr{border:0;border-top:1px solid var(--line);margin:16px 0}
-.trk .big{font-size:22px;font-weight:700;color:var(--acc)}
+.trk .big{font-size:24px;font-weight:800;color:var(--acc)}
 .trk .route{font-size:16px;margin:6px 0 2px}
 .bar{height:12px;background:#0e1217;border:1px solid var(--line);border-radius:7px;overflow:hidden;margin:12px 0 6px}
 .bar>i{display:block;height:100%;background:var(--acc)}
 .trk .meta{display:flex;justify-content:space-between;color:var(--mut);font-size:13px}
+.pill{display:inline-block;font-size:12px;padding:3px 9px;border-radius:20px;background:#0e1217;border:1px solid var(--line);color:var(--mut);margin-right:6px}
+.pill.ok{color:var(--ok);border-color:#1f5e3a}.pill.bad{color:var(--bad);border-color:#5e2020}
 </style></head><body><div class=wrap>
-<h1><span class=dot id=dot></span>FlightWall Mini</h1>
-<div class=sub id=status>starting...</div>
-<div class=sub id=health style="margin-top:2px"></div>
-<div class=grid>
-  <div class=card>
-    <h2>Live</h2>
-    <div id=list><div class=empty>loading...</div></div>
-  </div>
-  <div class=card>
-    <h2>Settings</h2>
-    <div class=field><label>Data source</label><select id=data_source>
-      <option value=fr24>Flightradar24 (paid - all in one)</option>
-      <option value=opensky>OpenSky (free positions + adsbdb routes)</option>
-      <option value=flightaware>FlightAware (paid)</option></select></div>
-    <div class=field src=fr24><label>Flightradar24 API token</label><input id=fr24_token type=password placeholder="FR24 token"></div>
-    <div class=row2 src=opensky>
-      <div class=field><label>OpenSky client id</label><input id=opensky_client_id placeholder=optional></div>
-      <div class=field><label>OpenSky secret</label><input id=opensky_client_secret type=password placeholder=optional></div>
-    </div>
-    <div class=field src=flightaware><label>FlightAware API key</label><input id=flightaware_api_key type=password placeholder="AeroAPI key"></div>
-    <div class=field><label>Mode</label><select id=mode>
+<div class=head><div class=logo>&#9992;</div><div><h1>FlightWall Mini</h1><div class=sub id=status>starting...</div></div></div>
+
+<div class=tabs id=tabs>
+  <div class=tab data-tab=live>Live</div>
+  <div class=tab data-tab=display>Display</div>
+  <div class=tab data-tab=clock>Clock</div>
+  <div class=tab data-tab=look>Look</div>
+  <div class=tab data-tab=sources>Sources</div>
+  <div class=tab data-tab=device>Device</div>
+</div>
+
+<div class=panel data-tab=live>
+  <div class=card><h2>Live</h2><div id=list><div class=empty>loading...</div></div></div>
+</div>
+
+<div class=panel data-tab=display>
+  <div class=card><h2>Mode</h2>
+    <div class=field><select id=mode>
       <option value=nearby>Nearby - cycle local flights</option>
       <option value=track>Track - follow one flight</option>
-      <option value=clock>Clock only - big clock, no flights</option>
-      <option value=world>World clock - cycle timezones</option>
-      <option value=world4>World clock x4 - 4 zones at once</option>
-      <option value=weather>Weather - forecast + clock</option>
       <option value=picture>Picture - show uploaded image</option>
-      <option value=rotate>Rotate - cycle through screens</option></select></div>
-    <div class=field id=trackrow><label>Flight to track (callsign or number)</label><input id=track_flight placeholder="e.g. UAL123"></div>
-    <hr>
+      <option value=rotate>Rotate - cycle through screens</option>
+      <option value=clock>Clock only</option>
+      <option value=world>World clock</option>
+      <option value=world4>World clock x4</option>
+      <option value=weather>Weather</option></select></div>
+    <div class=field id=trackrow><label>Flight to track</label><input id=track_flight placeholder="e.g. UAL123"></div>
+  </div>
+  <div class=card id=nearbycard><h2>Nearby</h2>
+    <div class=row2>
+      <div class=field><label>Max aircraft</label><input id=max_aircraft type=number></div>
+      <div class=field><label>Seconds per plane</label><input id=cycle_sec type=number min=2 max=60></div>
+    </div>
+    <div class=note>Seconds per plane controls how fast the wall flips planes - it does not change how often data is fetched.</div>
+  </div>
+  <div class=card id=rotatecard><h2>Rotate screens</h2>
+    <div class=opts id=rotopts></div>
+    <div class=field style="margin-top:12px"><label>Seconds per screen</label><input id=rotate_sec type=number min=3 max=120></div>
+  </div>
+  <div class=card id=picturecard><h2>Picture</h2>
+    <div class=field><input id=picfile type=file accept="image/*"></div>
+    <button type=button class=ghost onclick=uploadPic()>Upload picture</button>
+    <div class=note id=pichint>Resized to 128x64. Switch Mode to Picture to show it.</div>
+  </div>
+</div>
+
+<div class=panel data-tab=clock>
+  <div class=card><h2>Time</h2>
+    <label class=chk><input id=clock24h type=checkbox><span>24-hour clock</span></label>
+    <label class=chk><input id=show_clock type=checkbox><span>Show clock on flight screens</span></label>
+  </div>
+  <div class=card><h2>Date</h2>
+    <label class=chk><input id=clock_date type=checkbox><span>Show date</span></label>
+    <div class=field style="margin-top:10px"><label>Date format</label><select id=date_format>__DATEOPTS__</select></div>
+  </div>
+  <div class=card><h2>World clock zones</h2>
+    <select id=world_zones multiple size=8 style="height:auto">__ZONEOPTS__</select>
+    <div class=note>Cmd/Ctrl-click for multiple. World x4 uses the first 4.</div>
+  </div>
+  <div class=card><h2>Weather</h2>
+    <label class=chk><input id=show_weather type=checkbox><span>Show weather on clock screen</span></label>
+  </div>
+  <div class=card><h2>Google Calendar (iCal)</h2>
+    <div class=field><input id=ical_url placeholder="https://calendar.google.com/.../basic.ics"></div>
+    <div class=note>Calendar &gt; Settings &gt; your calendar &gt; Secret address in iCal format.</div>
+  </div>
+</div>
+
+<div class=panel data-tab=look>
+  <div class=card><h2>Color</h2>
+    <div class=row2>
+      <div class=field><label>Text color</label><input id=text_color type=color style="height:44px;padding:4px"></div>
+      <div class=field><label>Brightness (0-255)</label><input id=brightness type=number min=0 max=255></div>
+    </div>
+    <label class=chk><input id=rainbow type=checkbox><span>Rainbow color cycle</span></label>
+  </div>
+  <div class=card><h2>Layout</h2>
+    <label class=chk><input id=show_border type=checkbox><span>Border around screen</span></label>
+    <label class=chk><input id=show_logos type=checkbox><span>Airline logos</span></label>
+    <div class=note id=logohint></div>
+    <div class=field style="margin-top:10px"><label>Logo size (px)</label><input id=logo_px type=number min=12 max=32></div>
+  </div>
+  <div class=card><h2>Night mode</h2>
+    <label class=chk><input id=night_mode type=checkbox><span>Auto-dim at night</span></label>
+    <div class=row2 style="margin-top:8px">
+      <div class=field><label>Night start</label><input id=night_start type=time></div>
+      <div class=field><label>Night end</label><input id=night_end type=time></div>
+    </div>
+    <div class=field><label>Night brightness (0-255)</label><input id=night_brightness type=number min=0 max=255></div>
+    <label class=chk><input id=night_to_clock type=checkbox><span>At night, switch to clock-only</span></label>
+  </div>
+</div>
+
+<div class=panel data-tab=sources>
+  <div class=card><h2>Data source</h2>
+    <div class=field><select id=data_source>
+      <option value=fr24>Flightradar24 (paid)</option>
+      <option value=opensky>OpenSky (free)</option>
+      <option value=flightaware>FlightAware (paid)</option></select></div>
+    <div class=field src=fr24><label>Flightradar24 API token</label><input id=fr24_token type=password></div>
+    <div class=row2 src=opensky>
+      <div class=field><label>OpenSky client id</label><input id=opensky_client_id placeholder=optional></div>
+      <div class=field><label>OpenSky secret</label><input id=opensky_client_secret type=password></div>
+    </div>
+    <div class=field src=flightaware><label>FlightAware API key</label><input id=flightaware_api_key type=password></div>
+    <label class=chk><input id=auto_fallback type=checkbox><span>Auto-fallback to OpenSky if source fails</span></label>
+  </div>
+  <div class=card><h2>Location</h2>
     <div class=row2>
       <div class=field><label>Latitude</label><input id=center_lat type=number step=0.0001></div>
       <div class=field><label>Longitude</label><input id=center_lon type=number step=0.0001></div>
     </div>
     <div class=row2>
       <div class=field><label>Radius (km)</label><input id=radius_km type=number></div>
-      <div class=field><label>Max aircraft</label><input id=max_aircraft type=number></div>
+      <div class=field><label>Refresh data (s)</label><input id=refresh_sec type=number></div>
     </div>
-    <div class=field><label>Refresh every (seconds)</label><input id=refresh_sec type=number></div>
-    <div class=field><label>Show origin/destination as</label><select id=place_style>
-      <option value=city>City name (Los Angeles)</option>
-      <option value=code>Airport code (LAX)</option></select></div>
-    <div class=field><label style="display:flex;align-items:center;gap:8px"><input id=airline_only type=checkbox style="width:auto"> Hide private / GA flights</label></div>
-    <div class=field><label style="display:flex;align-items:center;gap:8px"><input id=auto_fallback type=checkbox style="width:auto"> Auto-fallback to OpenSky if source fails</label></div>
-    <div class=field><label style="display:flex;align-items:center;gap:8px"><input id=highlight_special type=checkbox style="width:auto"> Highlight emergency / military flights</label></div>
-    <div class=field><label style="display:flex;align-items:center;gap:8px"><input id=show_weather type=checkbox style="width:auto"> Show weather on clock screen</label></div>
-    <div class=field><label>Only these airlines (codes, comma-separated; blank = all)</label><input id=fav_airlines placeholder="e.g. UA, AAL, DL"></div>
-    <div class=field><label>Only these aircraft types (blank = all)</label><input id=fav_types placeholder="e.g. B738, A320"></div>
-    <div class=field><label style="display:flex;align-items:center;gap:8px"><input id=show_clock type=checkbox style="width:auto"> Show clock (top-left)</label></div>
-    <div class=field><label style="display:flex;align-items:center;gap:8px"><input id=clock24h type=checkbox style="width:auto"> 24-hour clock</label></div>
-    <div class=field><label style="display:flex;align-items:center;gap:8px"><input id=rainbow type=checkbox style="width:auto"> Rainbow color cycle</label></div>
-    <div class=field><label style="display:flex;align-items:center;gap:8px"><input id=night_mode type=checkbox style="width:auto"> Night mode (auto-dim)</label></div>
-    <div class=row2>
-      <div class=field><label>Night start</label><input id=night_start type=time></div>
-      <div class=field><label>Night end</label><input id=night_end type=time></div>
-    </div>
-    <div class=field><label>Night brightness (0-255)</label><input id=night_brightness type=number min=0 max=255></div>
-    <div class=field><label style="display:flex;align-items:center;gap:8px"><input id=night_to_clock type=checkbox style="width:auto"> At night, switch to clock-only</label></div>
-    <hr>
-    <div class=field><label style="display:flex;align-items:center;gap:8px"><input id=clock_date type=checkbox style="width:auto"> Show date on clock screen</label></div>
-    <div class=field><label>Date format</label><select id=date_format>__DATEOPTS__</select></div>
-    <div class=field><label>World clock zones (for World modes; pick several)</label>
-      <select id=world_zones multiple size=8 style="height:auto">__ZONEOPTS__</select>
-      <div class=note>Cmd/Ctrl-click to select multiple. World x4 uses the first 4.</div></div>
-    <div class=field><label>Rotate screens (comma list: nearby, world, world4, clock, weather, picture)</label><input id=rotate_screens placeholder="nearby,world,clock,weather"></div>
-    <div class=field><label>Seconds per screen (Rotate)</label><input id=rotate_sec type=number min=3 max=120></div>
-    <div class=field><label>Google Calendar secret iCal URL (shows events on clock/weather)</label><input id=ical_url placeholder="https://calendar.google.com/.../basic.ics"></div>
-    <div class=field><label>Picture (uploads + resizes to 128x64 for Picture mode)</label>
-      <input id=picfile type=file accept="image/*">
-      <button type=button onclick=uploadPic() style="margin-top:6px">Upload picture</button>
-      <div class=note id=pichint></div></div>
-    <hr>
-    <div class=row2>
-      <div class=field><label>Text color</label><input id=text_color type=color style="height:42px;padding:4px"></div>
-      <div class=field><label>Brightness (0-255)</label><input id=brightness type=number min=0 max=255></div>
-    </div>
-    <div class=field><label style="display:flex;align-items:center;gap:8px"><input id=show_border type=checkbox style="width:auto"> Border around screen</label></div>
-    <div class=field><label style="display:flex;align-items:center;gap:8px"><input id=show_logos type=checkbox style="width:auto"> Airline logos</label></div>
-    <div class=note id=logohint></div>
-    <div class=field style="margin-top:10px"><label>Logo size (px)</label><input id=logo_px type=number min=12 max=32></div>
-    <button onclick=save()>Save settings</button>
-    <div class=note>Changes apply immediately. Aircraft refresh right after saving.</div>
   </div>
-</div></div>
+  <div class=card><h2>Filters</h2>
+    <div class=field><label>Show airports as</label><select id=place_style>
+      <option value=city>City name</option><option value=code>Airport code</option></select></div>
+    <label class=chk><input id=airline_only type=checkbox><span>Hide private / GA flights</span></label>
+    <label class=chk><input id=highlight_special type=checkbox><span>Highlight emergency / military</span></label>
+    <div class=field style="margin-top:10px"><label>Only these airlines (blank = all)</label><input id=fav_airlines placeholder="UA, AAL, DL"></div>
+    <div class=field><label>Only these aircraft types (blank = all)</label><input id=fav_types placeholder="B738, A320"></div>
+  </div>
+</div>
+
+<div class=panel data-tab=device>
+  <div class=card><h2>Status</h2><div id=health class=sub>checking...</div></div>
+  <div class=card><h2>About</h2>
+    <div class=note>This dashboard, the iOS app, and the wall all stay in sync automatically. Changes here appear on the others within a few seconds.</div>
+  </div>
+</div>
+
+</div>
+<div class=savebar><div class=inner><button onclick=save()>Save settings</button></div></div>
 <div class=toast id=toast>Saved</div>
 <script>
 const $=id=>document.getElementById(id);
-const FIELDS=["data_source","fr24_token","opensky_client_id","opensky_client_secret","flightaware_api_key","mode","track_flight","center_lat","center_lon","radius_km","max_aircraft","refresh_sec","place_style","airline_only","auto_fallback","highlight_special","show_weather","fav_airlines","fav_types","show_clock","clock24h","rainbow","night_mode","night_start","night_end","night_brightness","night_to_clock","clock_date","date_format","rotate_screens","rotate_sec","ical_url","text_color","brightness","show_border","show_logos","logo_px"];
-const NUM=["center_lat","center_lon","radius_km","max_aircraft","refresh_sec","brightness","logo_px","night_brightness","rotate_sec"];
+const FIELDS=["data_source","fr24_token","opensky_client_id","opensky_client_secret","flightaware_api_key","mode","track_flight","center_lat","center_lon","radius_km","max_aircraft","cycle_sec","refresh_sec","place_style","airline_only","auto_fallback","highlight_special","show_weather","fav_airlines","fav_types","show_clock","clock24h","rainbow","night_mode","night_start","night_end","night_brightness","night_to_clock","clock_date","date_format","rotate_sec","ical_url","text_color","brightness","show_border","show_logos","logo_px"];
+const NUM=["center_lat","center_lon","radius_km","max_aircraft","cycle_sec","refresh_sec","brightness","logo_px","night_brightness","rotate_sec"];
 const BOOL=["airline_only","auto_fallback","highlight_special","show_weather","show_clock","clock24h","rainbow","night_mode","night_to_clock","clock_date","show_border","show_logos"];
 const CREDS=["fr24_token","opensky_client_id","opensky_client_secret","flightaware_api_key"];
+const ROTOPTS=[["nearby","Nearby flights"],["track","Tracked flight"],["clock","Clock"],["world","World clock"],["world4","World clock x4"],["weather","Weather"],["picture","Picture"]];
+$('rotopts').innerHTML=ROTOPTS.map(o=>`<label class=chk><input type=checkbox class=rotcb value="${o[0]}"><span>${o[1]}</span></label>`).join('');
+function showTab(n){document.querySelectorAll('.panel').forEach(p=>p.style.display=p.dataset.tab===n?'':'none');document.querySelectorAll('.tab').forEach(t=>t.classList.toggle('on',t.dataset.tab===n));}
+document.querySelectorAll('.tab').forEach(t=>t.addEventListener('click',()=>showTab(t.dataset.tab)));
+showTab('live');
 function uploadPic(){
   const f=$('picfile').files[0]; if(!f){ $('pichint').textContent='Pick an image first.'; return; }
   const rd=new FileReader();
@@ -1095,13 +1166,19 @@ function uploadPic(){
 function syncRows(){
   const src=$('data_source').value;
   document.querySelectorAll('[src]').forEach(el=>{ el.style.display = el.getAttribute('src')===src ? '' : 'none'; });
-  $('trackrow').style.display = $('mode').value==='track' ? '' : 'none';
+  const m=$('mode').value;
+  $('trackrow').style.display = m==='track' ? '' : 'none';
+  $('nearbycard').style.display = m==='nearby' ? '' : 'none';
+  $('rotatecard').style.display = m==='rotate' ? '' : 'none';
+  $('picturecard').style.display = m==='picture' ? '' : 'none';
 }
 async function loadSettings(){
   const s=await (await fetch('/api/settings')).json();
   FIELDS.forEach(k=>{ const el=$(k); if(!el) return; if(BOOL.includes(k)) el.checked=!!s[k]; else el.value=s[k]; });
   CREDS.forEach(k=>{ const el=$(k); if(el){ el.value=''; el.placeholder = s[k+'_set'] ? 'saved - leave blank to keep' : 'not set'; }});
   const wz=$('world_zones'); if(wz){ const sel=(s.world_zones||'').split(',').map(x=>x.trim()); for(const o of wz.options) o.selected=sel.includes(o.value); }
+  const rs=(s.rotate_screens||'').split(',').map(x=>x.trim());
+  document.querySelectorAll('.rotcb').forEach(c=>c.checked=rs.includes(c.value));
   syncRows();
 }
 $('data_source').addEventListener('change',syncRows);
@@ -1109,8 +1186,9 @@ $('mode').addEventListener('change',syncRows);
 async function save(){
   const body={};
   FIELDS.forEach(k=>{ const el=$(k); if(!el) return; let v=BOOL.includes(k)?el.checked:el.value; if(NUM.includes(k)) v=parseFloat(v); body[k]=v; });
-  CREDS.forEach(k=>{ if(body[k]==='') delete body[k]; });   // blank = keep saved key
+  CREDS.forEach(k=>{ if(body[k]==='') delete body[k]; });
   const wz=$('world_zones'); if(wz){ body.world_zones=[...wz.selectedOptions].map(o=>o.value).join(','); }
+  body.rotate_screens=[...document.querySelectorAll('.rotcb:checked')].map(c=>c.value).join(',');
   await fetch('/api/settings',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)});
   const t=$('toast'); t.classList.add('show'); setTimeout(()=>t.classList.remove('show'),1400);
   loadSettings(); refresh();
@@ -1128,24 +1206,26 @@ async function refresh(){
   try{
     const d=await (await fetch('/api/status')).json();
     $('dot').classList.toggle('on', d.count>0);
-    $('status').textContent = `${d.mode==='track'?'tracking':d.count+' aircraft'} \u00b7 ${d.source} \u00b7 updated ${ago(d.last_update)}` + (d.error?` \u00b7 error: ${d.error}`:'');
+    $('status').innerHTML = `<span class=dot id=dot></span>${d.mode==='track'?'tracking':d.count+' aircraft'} \u00b7 ${d.active_source||d.source} \u00b7 ${ago(d.last_update)}` + (d.error?` \u00b7 ${d.error}`:'');
     const hh=$('health');
     if(hh){
-      const srv = d.server_ok ? '\u2705 Server OK' : (d.error ? '\u26a0 Server: '+d.error : '\u23f3 Server starting');
-      const dev = d.device_online ? `\u2705 Display connected (${ago(d.device_last)})`
-                                   : (d.device_ip ? `\u274c Display offline (last seen ${ago(d.device_last)})`
-                                                  : '\u274c Display never connected');
-      hh.innerHTML = srv + ' &nbsp;\u00b7&nbsp; ' + dev;
+      const srv = d.server_ok ? '<span class="pill ok">Server OK</span>' : '<span class="pill bad">Server '+(d.error||'starting')+'</span>';
+      const dev = d.device_online ? `<span class="pill ok">Display online (${ago(d.device_last)})</span>`
+                  : (d.device_ip ? `<span class="pill bad">Display offline (${ago(d.device_last)})</span>`
+                                 : '<span class="pill bad">Display never connected</span>');
+      const wx = d.weather ? `<span class=pill>${d.weather}</span>` : '';
+      hh.innerHTML = srv+' '+dev+' '+wx;
     }
     const lh=$('logohint');
     if(lh){
-      if(!d.logos_on) lh.textContent='Logos off (no key needed). Turn on + re-flash the ESP32 once.';
-      else if(!d.have_pil) lh.textContent='\u26a0 Pillow not installed - run: pip install Pillow';
-      else if(d.logo_count>0) lh.textContent=`Logos active for ${d.logo_count}/${d.count} aircraft. If the panel shows none, re-flash the ESP32.`;
-      else lh.textContent='No logos yet. Test one: /api/logotest?code=UA';
+      if(!d.logos_on) lh.textContent='Logos off.';
+      else if(!d.have_pil) lh.textContent='Pillow not installed - run: pip install Pillow';
+      else if(d.logo_count>0) lh.textContent=`Logos active for ${d.logo_count}/${d.count} aircraft.`;
+      else lh.textContent='No logos yet.';
     }
+    const listEl=$('list'); if(!listEl) return;
     if(d.mode==='track'){
-      $('list').innerHTML = d.aircraft.length ? trackerView(d.aircraft[0]) : '<div class=empty>That flight isn\\'t airborne right now.</div>';
+      listEl.innerHTML = d.aircraft.length ? trackerView(d.aircraft[0]) : '<div class=empty>That flight isn\\'t airborne right now.</div>';
       return;
     }
     const rows=d.aircraft.map(a=>{
@@ -1153,17 +1233,16 @@ async function refresh(){
       return `<tr><td class=cs>${a.cs||''}</td><td class=mut>${a.type||''}</td><td>${route}</td>
               <td>${a.alt}ft</td><td>${a.spd}mph</td><td class=mut>${a.dist}km</td></tr>`;
     }).join('');
-    $('list').innerHTML = d.aircraft.length
+    listEl.innerHTML = d.aircraft.length
       ? `<table><tr><th>Flight</th><th>Type</th><th>Route</th><th>Alt</th><th>Spd</th><th>Dist</th></tr>${rows}</table>`
       : '<div class=empty>No aircraft nearby right now.</div>';
   }catch(e){ $('status').textContent='server unreachable'; }
 }
 loadSettings(); refresh(); setInterval(refresh,3000);
-// Live sync: if settings change elsewhere (app/wall), reload - unless mid-edit.
-let lastSyncVer=-1, lastTouch=0;
+let lastTouch=0;
 document.addEventListener('input',()=>{ lastTouch=Date.now(); });
 async function syncSettings(){
-  if(Date.now()-lastTouch < 4000) return;            // user editing; skip
+  if(Date.now()-lastTouch < 4000) return;
   try{
     const v=(await (await fetch('/version')).json()).v;
     if(v===window._sv) return; window._sv=v;
