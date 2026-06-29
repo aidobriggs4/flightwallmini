@@ -66,6 +66,10 @@ DEFAULTS = {
     "fav_types": "",                  # comma aircraft types; if set, show only these
     "show_weather": False,            # show local weather on the clock screen
     "world_zones": "America/Los_Angeles,America/New_York,Europe/London,Asia/Tokyo",
+    "rotate_screens": "nearby,world,clock,weather",
+    "rotate_sec": 10,
+    "ical_url": "",                   # Google Calendar secret iCal URL
+    "cycle_sec": 8,                   # seconds each plane is shown (display only, not API)
 }
 
 _settings = dict(DEFAULTS)
@@ -81,6 +85,10 @@ _device_last = 0      # when the ESP32 last fetched /flights
 _version = 1          # bumps on every settings change or data refresh (for instant ESP polling)
 _active_source = ""   # the source actually used last (may differ if fallback kicked in)
 _weather = {"txt": "", "exp": 0}
+_picture = ""         # base64 RGB565 128x64 image for picture mode
+_picture_ver = 0
+_rotate_last = ""
+PICTURE_FILE = os.environ.get("FLIGHTWALL_PICTURE", os.path.join(HERE, "picture.b64"))
 _logo_cache = {}
 _airport_cache = {}
 _route_cache = {}
@@ -607,31 +615,104 @@ WEATHER_CODES = {0: "Clear", 1: "Clear", 2: "Cloudy", 3: "Overcast", 45: "Fog", 
                  81: "Showers", 82: "Showers", 95: "Storm", 96: "Storm", 99: "Storm"}
 
 
+_forecast = {"data": {}, "exp": 0}
+
+
 def get_weather():
-    if not get("show_weather"):
-        return ""
-    if time.time() < _weather["exp"]:
-        return _weather["txt"]
+    get_forecast()
+    return _weather["txt"]
+
+
+def get_forecast():
+    """Current temp + today's high/low + condition. Cached 15 min."""
+    if time.time() < _forecast["exp"]:
+        return _forecast["data"]
+    data = {}
     try:
         lat, lon = get("center_lat"), get("center_lon")
         url = (f"https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}"
-               "&current=temperature_2m,weather_code&temperature_unit=fahrenheit")
+               "&current=temperature_2m,weather_code"
+               "&daily=temperature_2m_max,temperature_2m_min"
+               "&temperature_unit=fahrenheit&timezone=auto&forecast_days=1")
         with urllib.request.urlopen(url, timeout=15) as r:
             j = json.load(r)
         cur = j.get("current") or {}
+        daily = j.get("daily") or {}
         t = round(cur.get("temperature_2m", 0))
         desc = WEATHER_CODES.get(cur.get("weather_code"), "")
+        hi = round((daily.get("temperature_2m_max") or [0])[0])
+        lo = round((daily.get("temperature_2m_min") or [0])[0])
+        data = {"temp": t, "hi": hi, "lo": lo, "desc": desc}
         _weather["txt"] = f"{t}F {desc}".strip()
     except Exception:
+        data = {}
         _weather["txt"] = ""
-    _weather["exp"] = time.time() + 900      # refresh every 15 min
-    return _weather["txt"]
+    _forecast["data"] = data
+    _forecast["exp"] = time.time() + 900
+    return data
+
+
+_calendar = {"events": [], "exp": 0}
+
+
+def get_calendar():
+    """Parse the next few events from a Google Calendar secret iCal URL. Cached 5 min."""
+    url = get("ical_url").strip()
+    if not url:
+        return []
+    if time.time() < _calendar["exp"]:
+        return _calendar["events"]
+    events = []
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "FlightWallMini"})
+        with urllib.request.urlopen(req, timeout=20) as r:
+            raw = r.read().decode("utf-8", "replace")
+        now = datetime.datetime.now()
+        for block in raw.split("BEGIN:VEVENT")[1:]:
+            summary, dt = "", None
+            for line in block.splitlines():
+                if line.startswith("SUMMARY"):
+                    summary = line.split(":", 1)[-1].strip()
+                elif line.startswith("DTSTART"):
+                    val = line.split(":", 1)[-1].strip()
+                    try:
+                        if "T" in val:
+                            dt = datetime.datetime.strptime(val[:15], "%Y%m%dT%H%M%S")
+                        else:
+                            dt = datetime.datetime.strptime(val[:8], "%Y%m%d")
+                    except Exception:
+                        dt = None
+            if summary and dt and dt >= now - datetime.timedelta(hours=1):
+                events.append((dt, summary))
+        events.sort(key=lambda e: e[0])
+        out = []
+        for dt, summary in events[:3]:
+            tstr = dt.strftime("%-I:%M%p").lower() if dt.hour or dt.minute else dt.strftime("%-m/%-d")
+            out.append({"time": tstr, "title": summary[:20]})
+        _calendar["events"] = out
+    except Exception:
+        _calendar["events"] = []
+    _calendar["exp"] = time.time() + 300
+    return _calendar["events"]
+
+
+# --- rotate mode: server cycles the reported screen; the panel just follows ---
+def rotate_list():
+    return [s.strip() for s in get("rotate_screens").split(",") if s.strip()] or ["clock"]
+
+
+def current_rotate_screen():
+    screens = rotate_list()
+    rs = max(3, int(get("rotate_sec")))
+    return screens[int(time.time() // rs) % len(screens)]
+
+
 
 
 def fetch_data():
     global _active_source
     mode = effective_mode()
-    if mode in ("clock", "world", "world4"):
+    if mode in ("clock", "world", "world4", "weather", "picture"):
         _active_source = get("data_source")
         return []
     src = get("data_source")
@@ -640,11 +721,12 @@ def fetch_data():
         res = finalize(table.get(src, fr24_nearby)(), track=(mode == "track"))
         _active_source = src
         return res
-    except Exception:
+    except Exception as e:
         # auto-fallback to the free OpenSky source if the chosen one fails
         if get("auto_fallback") and src != "opensky":
+            print(f"[{time.strftime('%H:%M:%S')}] {src} FAILED ({e}) -> falling back to OpenSky")
             res = finalize(table["opensky"](), track=(mode == "track"))
-            _active_source = "opensky*"
+            _active_source = "opensky (fallback from " + src + ")"
             return res
         raise
 
@@ -659,7 +741,7 @@ def refresh_loop():
                 _last_update = time.time()
                 _last_error = ""
                 _version += 1
-            print(f"[{time.strftime('%H:%M:%S')}] {get('data_source')}/{effective_mode()}: {len(ac)} aircraft")
+            print(f"[{time.strftime('%H:%M:%S')}] source={_active_source}  mode={effective_mode()}  -> {len(ac)} aircraft")
         except Exception as e:
             with _data_lock:
                 _last_error = str(e)
@@ -691,7 +773,10 @@ def effective_mode():
     # Auto-switch to clock-only during the night window if enabled.
     if get("night_to_clock") and _is_night():
         return "clock"
-    return get("mode")
+    m = get("mode")
+    if m == "rotate":
+        return current_rotate_screen()
+    return m
 
 
 # date_format key -> human label (for the UI). Formatting is done in format_date().
@@ -782,7 +867,11 @@ def world_times():
         except Exception:
             continue
         ab = ZONE_AB.get(zid, zid.split("/")[-1][:3].upper())
-        out.append({"ab": ab, "off": off})
+        hrs = off / 60.0
+        sign = "+" if hrs >= 0 else "-"
+        ah = abs(hrs)
+        gmt = f"{sign}{int(ah)}" if ah == int(ah) else f"{sign}{int(ah)}:{int(round((ah-int(ah))*60)):02d}"
+        out.append({"ab": ab, "off": off, "gmt": gmt})
     return out[:8]
 
 
@@ -807,6 +896,40 @@ def format_date(fmt):
     return table.get(fmt, table["month_day_year"])
 
 
+def load_picture():
+    global _picture
+    try:
+        if os.path.exists(PICTURE_FILE):
+            with open(PICTURE_FILE) as f:
+                _picture = f.read().strip()
+    except Exception:
+        _picture = ""
+
+
+def store_picture(data_url):
+    """Take a data: URL or base64 image, resize to 128x64, store as RGB565 base64."""
+    global _picture, _picture_ver
+    if not HAVE_PIL:
+        raise RuntimeError("Pillow not installed (pip install Pillow)")
+    b64 = data_url.split(",", 1)[-1]
+    raw = base64.b64decode(b64)
+    img = Image.open(io.BytesIO(raw)).convert("RGB").resize((128, 64))
+    out = bytearray()
+    for y in range(64):
+        for x in range(128):
+            r, g, b = img.getpixel((x, y))
+            v = ((r >> 3) << 11) | ((g >> 2) << 5) | (b >> 3)
+            out.append((v >> 8) & 0xFF)
+            out.append(v & 0xFF)
+    _picture = base64.b64encode(bytes(out)).decode()
+    _picture_ver += 1
+    try:
+        with open(PICTURE_FILE, "w") as f:
+            f.write(_picture)
+    except Exception:
+        pass
+
+
 def config_obj():
     hexc = get("text_color").lstrip("#")
     try:
@@ -816,12 +939,16 @@ def config_obj():
     date_str = format_date(get("date_format")) if get("clock_date") else ""
     m = effective_mode()
     zones = world_times() if m in ("world", "world4") else []
+    forecast = get_forecast() if m == "weather" else {}
+    cal = get_calendar() if m in ("clock", "weather") else []
     return {"color": [r, g, b], "brightness": effective_brightness(),
             "border": bool(get("show_border")), "logos": bool(get("show_logos")),
             "logo_px": int(get("logo_px")), "mode": m,
             "clock": bool(get("show_clock")), "clock24": bool(get("clock24h")),
             "rainbow": bool(get("rainbow")), "date": date_str,
-            "weather": get_weather(), "zones": zones}
+            "weather": get_weather() if get("show_weather") else "",
+            "zones": zones, "forecast": forecast, "cal": cal,
+            "cycle": int(get("cycle_sec"))}
 
 
 # ---------------- web ----------------
@@ -890,7 +1017,10 @@ hr{border:0;border-top:1px solid var(--line);margin:16px 0}
       <option value=track>Track - follow one flight</option>
       <option value=clock>Clock only - big clock, no flights</option>
       <option value=world>World clock - cycle timezones</option>
-      <option value=world4>World clock x4 - 4 zones at once</option></select></div>
+      <option value=world4>World clock x4 - 4 zones at once</option>
+      <option value=weather>Weather - forecast + clock</option>
+      <option value=picture>Picture - show uploaded image</option>
+      <option value=rotate>Rotate - cycle through screens</option></select></div>
     <div class=field id=trackrow><label>Flight to track (callsign or number)</label><input id=track_flight placeholder="e.g. UAL123"></div>
     <hr>
     <div class=row2>
@@ -927,6 +1057,13 @@ hr{border:0;border-top:1px solid var(--line);margin:16px 0}
     <div class=field><label>World clock zones (for World modes; pick several)</label>
       <select id=world_zones multiple size=8 style="height:auto">__ZONEOPTS__</select>
       <div class=note>Cmd/Ctrl-click to select multiple. World x4 uses the first 4.</div></div>
+    <div class=field><label>Rotate screens (comma list: nearby, world, world4, clock, weather, picture)</label><input id=rotate_screens placeholder="nearby,world,clock,weather"></div>
+    <div class=field><label>Seconds per screen (Rotate)</label><input id=rotate_sec type=number min=3 max=120></div>
+    <div class=field><label>Google Calendar secret iCal URL (shows events on clock/weather)</label><input id=ical_url placeholder="https://calendar.google.com/.../basic.ics"></div>
+    <div class=field><label>Picture (uploads + resizes to 128x64 for Picture mode)</label>
+      <input id=picfile type=file accept="image/*">
+      <button type=button onclick=uploadPic() style="margin-top:6px">Upload picture</button>
+      <div class=note id=pichint></div></div>
     <hr>
     <div class=row2>
       <div class=field><label>Text color</label><input id=text_color type=color style="height:42px;padding:4px"></div>
@@ -943,10 +1080,18 @@ hr{border:0;border-top:1px solid var(--line);margin:16px 0}
 <div class=toast id=toast>Saved</div>
 <script>
 const $=id=>document.getElementById(id);
-const FIELDS=["data_source","fr24_token","opensky_client_id","opensky_client_secret","flightaware_api_key","mode","track_flight","center_lat","center_lon","radius_km","max_aircraft","refresh_sec","place_style","airline_only","auto_fallback","highlight_special","show_weather","fav_airlines","fav_types","show_clock","clock24h","rainbow","night_mode","night_start","night_end","night_brightness","night_to_clock","clock_date","date_format","text_color","brightness","show_border","show_logos","logo_px"];
-const NUM=["center_lat","center_lon","radius_km","max_aircraft","refresh_sec","brightness","logo_px","night_brightness"];
+const FIELDS=["data_source","fr24_token","opensky_client_id","opensky_client_secret","flightaware_api_key","mode","track_flight","center_lat","center_lon","radius_km","max_aircraft","refresh_sec","place_style","airline_only","auto_fallback","highlight_special","show_weather","fav_airlines","fav_types","show_clock","clock24h","rainbow","night_mode","night_start","night_end","night_brightness","night_to_clock","clock_date","date_format","rotate_screens","rotate_sec","ical_url","text_color","brightness","show_border","show_logos","logo_px"];
+const NUM=["center_lat","center_lon","radius_km","max_aircraft","refresh_sec","brightness","logo_px","night_brightness","rotate_sec"];
 const BOOL=["airline_only","auto_fallback","highlight_special","show_weather","show_clock","clock24h","rainbow","night_mode","night_to_clock","clock_date","show_border","show_logos"];
 const CREDS=["fr24_token","opensky_client_id","opensky_client_secret","flightaware_api_key"];
+function uploadPic(){
+  const f=$('picfile').files[0]; if(!f){ $('pichint').textContent='Pick an image first.'; return; }
+  const rd=new FileReader();
+  rd.onload=async()=>{ $('pichint').textContent='Uploading...';
+    const r=await fetch('/api/picture',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({image:rd.result})});
+    const j=await r.json(); $('pichint').textContent=j.ok?'Uploaded. Switch Mode to Picture to see it.':('Error: '+(j.error||'failed')); };
+  rd.readAsDataURL(f);
+}
 function syncRows(){
   const src=$('data_source').value;
   document.querySelectorAll('[src]').forEach(el=>{ el.style.display = el.getAttribute('src')===src ? '' : 'none'; });
@@ -1014,6 +1159,18 @@ async function refresh(){
   }catch(e){ $('status').textContent='server unreachable'; }
 }
 loadSettings(); refresh(); setInterval(refresh,3000);
+// Live sync: if settings change elsewhere (app/wall), reload - unless mid-edit.
+let lastSyncVer=-1, lastTouch=0;
+document.addEventListener('input',()=>{ lastTouch=Date.now(); });
+async function syncSettings(){
+  if(Date.now()-lastTouch < 4000) return;            // user editing; skip
+  try{
+    const v=(await (await fetch('/version')).json()).v;
+    if(v===window._sv) return; window._sv=v;
+    if(Date.now()-lastTouch >= 4000) loadSettings();
+  }catch(e){}
+}
+setInterval(syncSettings,3000);
 </script></body></html>"""
 
 MANIFEST = json.dumps({
@@ -1067,8 +1224,17 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         path = self.path.split("?")[0]
         if path == "/version":
+            global _rotate_last, _version
             with _data_lock:
-                self._send(200, "application/json", json.dumps({"v": _version}))
+                if get("mode") == "rotate":
+                    cur = effective_mode()
+                    if cur != _rotate_last:
+                        _rotate_last = cur
+                        _version += 1
+                self._send(200, "application/json", json.dumps({"v": _version, "pv": _picture_ver}))
+            return
+        if path == "/picture":
+            self._send(200, "application/json", json.dumps({"pv": _picture_ver, "img": _picture}))
             return
         if path == "/flights":
             global _device_ip, _device_last
@@ -1124,13 +1290,24 @@ class Handler(BaseHTTPRequestHandler):
             self._send(404, "text/plain", "not found")
 
     def do_POST(self):
+        global _version
+        if self.path == "/api/picture":
+            try:
+                n = int(self.headers.get("Content-Length", 0))
+                body = json.loads(self.rfile.read(n).decode() or "{}")
+                store_picture(body.get("image", ""))
+                with _data_lock:
+                    _version += 1
+                self._send(200, "application/json", json.dumps({"ok": True, "pv": _picture_ver}))
+            except Exception as e:
+                self._send(400, "application/json", json.dumps({"ok": False, "error": str(e)}))
+            return
         if self.path != "/api/settings":
             self._send(404, "text/plain", "not found")
             return
         try:
             n = int(self.headers.get("Content-Length", 0))
             incoming = json.loads(self.rfile.read(n).decode() or "{}")
-            global _version
             with _settings_lock:
                 for k in DEFAULTS:
                     if k in incoming and incoming[k] is not None:
@@ -1164,6 +1341,7 @@ def local_ip():
 
 if __name__ == "__main__":
     load_settings()
+    load_picture()
     threading.Thread(target=refresh_loop, daemon=True).start()
     ip, port = local_ip(), get("port")
     print("=" * 56)
