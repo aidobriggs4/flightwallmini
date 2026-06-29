@@ -1205,8 +1205,8 @@ function trackerView(a){
 async function refresh(){
   try{
     const d=await (await fetch('/api/status')).json();
-    $('dot').classList.toggle('on', d.count>0);
     $('status').innerHTML = `<span class=dot id=dot></span>${d.mode==='track'?'tracking':d.count+' aircraft'} \u00b7 ${d.active_source||d.source} \u00b7 ${ago(d.last_update)}` + (d.error?` \u00b7 ${d.error}`:'');
+    const dt=$('dot'); if(dt) dt.classList.toggle('on', d.count>0);
     const hh=$('health');
     if(hh){
       const srv = d.server_ok ? '<span class="pill ok">Server OK</span>' : '<span class="pill bad">Server '+(d.error||'starting')+'</span>';
