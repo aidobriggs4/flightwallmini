@@ -70,6 +70,8 @@ DEFAULTS = {
     "rotate_sec": 10,
     "ical_url": "",                   # Google Calendar secret iCal URL
     "cycle_sec": 8,                   # seconds each plane is shown (display only, not API)
+    "hide_no_route": False,           # skip flights with no known route
+    "hide_no_logo": False,            # skip flights with no airline logo
 }
 
 _settings = dict(DEFAULTS)
@@ -92,6 +94,7 @@ PICTURE_FILE = os.environ.get("FLIGHTWALL_PICTURE", os.path.join(HERE, "picture.
 _logo_cache = {}
 _airport_cache = {}
 _route_cache = {}
+_actype_cache = {}   # icao24 -> ICAO type code (type never changes, cache long)
 _os_token = {"val": None, "exp": 0}
 
 # Credential fields: masked in GET, and never overwritten by a blank on POST.
@@ -132,6 +135,44 @@ def haversine(lat1, lon1, lat2, lon2):
     dl = math.radians(lon2 - lon1)
     a = math.sin(dp / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dl / 2) ** 2
     return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+
+
+def bearing(lat1, lon1, lat2, lon2):
+    p1, p2 = math.radians(lat1), math.radians(lat2)
+    dl = math.radians(lon2 - lon1)
+    y = math.sin(dl) * math.cos(p2)
+    x = math.cos(p1) * math.sin(p2) - math.sin(p1) * math.cos(p2) * math.cos(dl)
+    return (math.degrees(math.atan2(y, x)) + 360) % 360
+
+
+def angle_diff(a, b):
+    d = abs((a - b) % 360)
+    return min(d, 360 - d)
+
+
+def validate_route(rt, lat, lon, track):
+    """OpenSky/adsbdb routes are direction-ambiguous - a callsign maps to a route
+    but not which leg. Use the plane's real position + heading to keep, reverse,
+    or drop the route so we never show a confidently-wrong direction."""
+    olat, olon = rt.get("olat"), rt.get("olon")
+    dlat, dlon = rt.get("dlat"), rt.get("dlon")
+    if None in (olat, olon, dlat, dlon) or track is None:
+        return rt                      # can't validate -> leave as-is
+    to_dest = bearing(lat, lon, dlat, dlon)
+    to_orig = bearing(lat, lon, olat, olon)
+    d_dest = angle_diff(track, to_dest)
+    d_orig = angle_diff(track, to_orig)
+    # If we're basically on top of an endpoint the bearings are noise - keep as-is.
+    if haversine(lat, lon, olat, olon) < 30 or haversine(lat, lon, dlat, dlon) < 30:
+        return rt
+    if d_orig + 25 < d_dest:            # clearly heading toward the "origin" -> reversed
+        return {**rt, "oc": rt.get("dc", ""), "ocity": rt.get("dcity", ""),
+                "olat": dlat, "olon": dlon,
+                "dc": rt.get("oc", ""), "dcity": rt.get("ocity", ""),
+                "dlat": olat, "dlon": olon}
+    if min(d_dest, d_orig) > 100:       # heading toward neither endpoint -> route is wrong
+        return {"aiata": rt.get("aiata", "")}   # keep airline (for logo), drop the route
+    return rt
 
 
 def airline_code(s):
@@ -228,6 +269,159 @@ def logo_diag(code):
         except Exception as e:
             last = str(e)
     return {"ok": False, "code": code, "error": last}
+
+
+
+# ICAO aircraft type code -> friendly name. Covers airliners, regional, business
+# jets, GA, military and helicopters. Unknown codes fall back to the raw code.
+AIRCRAFT_TYPES = {
+    # Airbus
+    "A19N": "A319neo", "A20N": "A320neo", "A21N": "A321neo",
+    "A318": "A318", "A319": "A319", "A320": "A320", "A321": "A321",
+    "A306": "A300-600", "A30B": "A300", "A310": "A310",
+    "A332": "A330-200", "A333": "A330-300", "A338": "A330-800neo", "A339": "A330-900neo",
+    "A342": "A340-200", "A343": "A340-300", "A345": "A340-500", "A346": "A340-600",
+    "A359": "A350-900", "A35K": "A350-1000", "A388": "A380",
+    "BCS1": "A220-100", "BCS3": "A220-300",
+    # Boeing
+    "B712": "717", "B722": "727-200",
+    "B732": "737-200", "B733": "737-300", "B734": "737-400", "B735": "737-500",
+    "B736": "737-600", "B737": "737-700", "B738": "737-800", "B739": "737-900",
+    "B37M": "737 MAX 7", "B38M": "737 MAX 8", "B39M": "737 MAX 9", "B3XM": "737 MAX 10",
+    "B741": "747-100", "B742": "747-200", "B743": "747-300", "B744": "747-400",
+    "B748": "747-8", "B74S": "747SP", "B752": "757-200", "B753": "757-300",
+    "B762": "767-200", "B763": "767-300", "B764": "767-400",
+    "B772": "777-200", "B77L": "777-200LR", "B773": "777-300", "B77W": "777-300ER",
+    "B778": "777-8", "B779": "777-9",
+    "B788": "787-8", "B789": "787-9", "B78X": "787-10",
+    # Embraer / Bombardier / regional
+    "E135": "ERJ-135", "E145": "ERJ-145", "E170": "E170", "E175": "E175",
+    "E190": "E190", "E195": "E195", "E290": "E190-E2", "E295": "E195-E2",
+    "CRJ1": "CRJ-100", "CRJ2": "CRJ-200", "CRJ7": "CRJ-700", "CRJ9": "CRJ-900", "CRJX": "CRJ-1000",
+    "DH8A": "Dash 8-100", "DH8B": "Dash 8-200", "DH8C": "Dash 8-300", "DH8D": "Dash 8-400",
+    "AT43": "ATR 42", "AT45": "ATR 42-500", "AT72": "ATR 72", "AT75": "ATR 72-500", "AT76": "ATR 72-600",
+    "SF34": "Saab 340", "SB20": "Saab 2000", "J328": "Dornier 328",
+    # Business / GA
+    "C172": "Cessna 172", "C152": "Cessna 152", "C182": "Cessna 182", "C206": "Cessna 206",
+    "C208": "Cessna Caravan", "C25A": "Citation CJ2", "C25B": "Citation CJ3", "C56X": "Citation Excel",
+    "C500": "Citation", "C510": "Citation Mustang", "C525": "CitationJet", "C550": "Citation II",
+    "C560": "Citation V", "C680": "Citation Sovereign", "C700": "Citation Longitude",
+    "CL30": "Challenger 300", "CL35": "Challenger 350", "CL60": "Challenger 600",
+    "GLF4": "Gulfstream IV", "GLF5": "Gulfstream V", "GLF6": "Gulfstream G650",
+    "G280": "Gulfstream G280", "GL5T": "Global 5000", "GLEX": "Global Express",
+    "LJ35": "Learjet 35", "LJ45": "Learjet 45", "LJ60": "Learjet 60",
+    "PC12": "Pilatus PC-12", "PC24": "Pilatus PC-24", "TBM9": "TBM 900", "DA42": "Diamond DA42",
+    "BE20": "King Air 200", "BE30": "King Air 350", "BE36": "Bonanza", "B350": "King Air 350",
+    "SR22": "Cirrus SR22", "SR20": "Cirrus SR20", "P28A": "Piper Cherokee", "PA34": "Piper Seneca",
+    "F2TH": "Falcon 2000", "FA7X": "Falcon 7X", "FA8X": "Falcon 8X", "H25B": "Hawker 800",
+    # Military
+    "C17": "C-17 Globemaster III", "C130": "C-130 Hercules", "C30J": "C-130J Super Hercules",
+    "C5M": "C-5 Galaxy", "K35R": "KC-135 Stratotanker", "KC46": "KC-46 Pegasus",
+    "E3TF": "E-3 Sentry (AWACS)", "E6": "E-6 Mercury", "P8": "P-8 Poseidon",
+    "C40": "C-40 Clipper", "C32": "C-32", "VC25": "Air Force One (VC-25)",
+    "F16": "F-16 Fighting Falcon", "F15": "F-15 Eagle", "F18": "F/A-18 Hornet",
+    "F22": "F-22 Raptor", "F35": "F-35 Lightning II", "A10": "A-10 Thunderbolt II",
+    "B52": "B-52 Stratofortress", "B1": "B-1 Lancer", "B2": "B-2 Spirit",
+    "C12": "C-12 Huron", "C146": "C-146 Wolfhound", "U2": "U-2 Dragon Lady",
+    "E2": "E-2 Hawkeye", "C2": "C-2 Greyhound", "T6": "T-6 Texan II", "T38": "T-38 Talon",
+    "A400": "A400M Atlas", "C295": "C-295", "C27J": "C-27J Spartan",
+    # Helicopters
+    "H60": "UH-60 Black Hawk", "UH60": "UH-60 Black Hawk", "S70": "S-70 Black Hawk",
+    "H47": "CH-47 Chinook", "CH47": "CH-47 Chinook", "H64": "AH-64 Apache",
+    "AS50": "AStar", "AS55": "TwinStar", "A139": "AW139", "A169": "AW169", "A189": "AW189",
+    "EC30": "EC130", "EC35": "EC135", "EC45": "EC145", "EC75": "EC175", "H500": "MD 500",
+    "B06": "Bell 206", "B407": "Bell 407", "B412": "Bell 412", "B429": "Bell 429",
+    "R22": "Robinson R22", "R44": "Robinson R44", "R66": "Robinson R66",
+    "S76": "Sikorsky S-76", "S92": "Sikorsky S-92", "AS65": "Dauphin", "H160": "Airbus H160",
+    "MD90": "MD-90", "MD11": "MD-11", "MD83": "MD-83", "MD88": "MD-88", "DC10": "DC-10",
+}
+
+
+def type_name(code):
+    code = (code or "").strip().upper()
+    if not code:
+        return ""
+    return AIRCRAFT_TYPES.get(code, code)
+
+
+# Major world cities (lat, lon, name) for the tracker's "Flying over" line.
+# Offline + dependency-free: shows the nearest major city, not every small town.
+CITIES = [
+    (40.71, -74.01, "New York"), (34.05, -118.24, "Los Angeles"), (41.88, -87.63, "Chicago"),
+    (29.76, -95.37, "Houston"), (33.45, -112.07, "Phoenix"), (39.95, -75.17, "Philadelphia"),
+    (29.42, -98.49, "San Antonio"), (32.72, -117.16, "San Diego"), (32.78, -96.80, "Dallas"),
+    (37.34, -121.89, "San Jose"), (30.27, -97.74, "Austin"), (30.33, -81.66, "Jacksonville"),
+    (37.77, -122.42, "San Francisco"), (39.96, -82.99, "Columbus"), (35.23, -80.84, "Charlotte"),
+    (39.77, -86.16, "Indianapolis"), (47.61, -122.33, "Seattle"), (39.74, -104.99, "Denver"),
+    (38.90, -77.04, "Washington DC"), (42.36, -71.06, "Boston"), (36.16, -86.78, "Nashville"),
+    (35.47, -97.52, "Oklahoma City"), (39.10, -84.51, "Cincinnati"), (45.51, -122.68, "Portland"),
+    (36.17, -115.14, "Las Vegas"), (42.33, -83.05, "Detroit"), (39.29, -76.61, "Baltimore"),
+    (45.00, -93.27, "Minneapolis"), (44.98, -93.27, "Minneapolis"), (38.63, -90.20, "St Louis"),
+    (39.10, -94.58, "Kansas City"), (32.78, -79.93, "Charleston"), (33.75, -84.39, "Atlanta"),
+    (25.76, -80.19, "Miami"), (28.54, -81.38, "Orlando"), (27.95, -82.46, "Tampa"),
+    (36.85, -75.98, "Virginia Beach"), (35.15, -90.05, "Memphis"), (43.04, -87.91, "Milwaukee"),
+    (41.26, -95.93, "Omaha"), (41.50, -81.69, "Cleveland"), (40.44, -79.99, "Pittsburgh"),
+    (40.76, -111.89, "Salt Lake City"), (43.61, -116.20, "Boise"), (35.08, -106.65, "Albuquerque"),
+    (31.76, -106.49, "El Paso"), (32.22, -110.97, "Tucson"), (34.75, -92.29, "Little Rock"),
+    (30.45, -91.19, "Baton Rouge"), (29.95, -90.07, "New Orleans"), (43.16, -77.61, "Rochester"),
+    (42.89, -78.88, "Buffalo"), (40.74, -74.17, "Newark"), (41.08, -81.52, "Akron"),
+    (41.66, -83.56, "Toledo"), (38.25, -85.76, "Louisville"), (36.75, -119.77, "Fresno"),
+    (38.58, -121.49, "Sacramento"), (34.42, -119.70, "Santa Barbara"), (33.77, -84.30, "Decatur"),
+    (40.81, -96.68, "Lincoln"), (46.59, -112.04, "Helena"), (43.62, -116.21, "Boise"),
+    (44.94, -123.04, "Salem"), (47.66, -117.43, "Spokane"), (61.22, -149.90, "Anchorage"),
+    (21.31, -157.86, "Honolulu"), (64.84, -147.72, "Fairbanks"),
+    (45.42, -75.70, "Ottawa"), (43.65, -79.38, "Toronto"), (45.50, -73.57, "Montreal"),
+    (49.28, -123.12, "Vancouver"), (51.05, -114.07, "Calgary"), (53.55, -113.49, "Edmonton"),
+    (19.43, -99.13, "Mexico City"), (20.67, -103.35, "Guadalajara"), (25.69, -100.32, "Monterrey"),
+    (23.13, -82.38, "Havana"), (18.47, -69.89, "Santo Domingo"), (9.93, -84.08, "San Jose CR"),
+    (4.71, -74.07, "Bogota"), (-12.05, -77.04, "Lima"), (-33.45, -70.67, "Santiago"),
+    (-34.60, -58.38, "Buenos Aires"), (-23.55, -46.63, "Sao Paulo"), (-22.91, -43.17, "Rio de Janeiro"),
+    (-15.79, -47.88, "Brasilia"), (10.49, -66.88, "Caracas"), (-0.18, -78.47, "Quito"),
+    (51.51, -0.13, "London"), (48.86, 2.35, "Paris"), (52.52, 13.40, "Berlin"),
+    (40.42, -3.70, "Madrid"), (41.90, 12.50, "Rome"), (52.37, 4.90, "Amsterdam"),
+    (50.85, 4.35, "Brussels"), (48.21, 16.37, "Vienna"), (47.37, 8.54, "Zurich"),
+    (59.33, 18.07, "Stockholm"), (59.91, 10.75, "Oslo"), (55.68, 12.57, "Copenhagen"),
+    (60.17, 24.94, "Helsinki"), (53.35, -6.26, "Dublin"), (38.72, -9.13, "Lisbon"),
+    (37.98, 23.73, "Athens"), (41.01, 28.98, "Istanbul"), (55.75, 37.62, "Moscow"),
+    (50.45, 30.52, "Kyiv"), (52.23, 21.01, "Warsaw"), (50.08, 14.44, "Prague"),
+    (47.50, 19.04, "Budapest"), (44.43, 26.10, "Bucharest"), (45.81, 15.98, "Zagreb"),
+    (53.48, -2.24, "Manchester"), (55.95, -3.19, "Edinburgh"), (51.45, -2.59, "Bristol"),
+    (48.14, 11.58, "Munich"), (50.94, 6.96, "Cologne"), (53.55, 10.00, "Hamburg"),
+    (43.30, 5.37, "Marseille"), (45.76, 4.84, "Lyon"), (41.39, 2.17, "Barcelona"),
+    (37.39, -5.99, "Seville"), (45.46, 9.19, "Milan"), (40.85, 14.27, "Naples"),
+    (30.04, 31.24, "Cairo"), (33.57, -7.59, "Casablanca"), (6.52, 3.38, "Lagos"),
+    (-1.29, 36.82, "Nairobi"), (-26.20, 28.05, "Johannesburg"), (-33.92, 18.42, "Cape Town"),
+    (-4.04, 39.67, "Mombasa"), (9.03, 38.74, "Addis Ababa"), (14.72, -17.47, "Dakar"),
+    (25.20, 55.27, "Dubai"), (24.71, 46.68, "Riyadh"), (31.77, 35.21, "Jerusalem"),
+    (33.89, 35.50, "Beirut"), (35.69, 51.39, "Tehran"), (24.47, 54.37, "Abu Dhabi"),
+    (25.29, 51.53, "Doha"), (29.37, 47.98, "Kuwait City"),
+    (28.61, 77.21, "Delhi"), (19.08, 72.88, "Mumbai"), (12.97, 77.59, "Bangalore"),
+    (13.08, 80.27, "Chennai"), (22.57, 88.36, "Kolkata"), (17.39, 78.49, "Hyderabad"),
+    (24.86, 67.01, "Karachi"), (31.55, 74.34, "Lahore"), (23.81, 90.41, "Dhaka"),
+    (27.72, 85.32, "Kathmandu"), (6.93, 79.86, "Colombo"),
+    (39.90, 116.41, "Beijing"), (31.23, 121.47, "Shanghai"), (23.13, 113.26, "Guangzhou"),
+    (22.54, 114.06, "Shenzhen"), (30.57, 104.07, "Chengdu"), (22.32, 114.17, "Hong Kong"),
+    (25.03, 121.57, "Taipei"), (37.57, 126.98, "Seoul"), (35.18, 129.08, "Busan"),
+    (35.68, 139.69, "Tokyo"), (34.69, 135.50, "Osaka"), (35.01, 135.77, "Kyoto"),
+    (43.06, 141.35, "Sapporo"), (33.59, 130.40, "Fukuoka"),
+    (1.35, 103.82, "Singapore"), (3.14, 101.69, "Kuala Lumpur"), (13.76, 100.50, "Bangkok"),
+    (-6.21, 106.85, "Jakarta"), (14.60, 120.98, "Manila"), (21.03, 105.85, "Hanoi"),
+    (10.82, 106.63, "Ho Chi Minh City"), (16.80, 96.15, "Yangon"), (11.56, 104.92, "Phnom Penh"),
+    (-33.87, 151.21, "Sydney"), (-37.81, 144.96, "Melbourne"), (-27.47, 153.03, "Brisbane"),
+    (-31.95, 115.86, "Perth"), (-34.93, 138.60, "Adelaide"), (-35.28, 149.13, "Canberra"),
+    (-36.85, 174.76, "Auckland"), (-41.29, 174.78, "Wellington"), (-43.53, 172.64, "Christchurch"),
+]
+
+
+def nearest_city(lat, lon):
+    if lat is None or lon is None:
+        return ""
+    best, bestd = "", 1e9
+    for clat, clon, name in CITIES:
+        d = haversine(lat, lon, clat, clon)
+        if d < bestd:
+            bestd, best = d, name
+    return best
 
 
 # ============================================================
@@ -371,6 +565,29 @@ def opensky_states(extra=""):
         raise RuntimeError(f"HTTP {e.code} from OpenSky: {e.reason}")
 
 
+def adsbdb_aircraft(icao24):
+    """Look up an aircraft's ICAO type code by its Mode-S/icao24 hex. OpenSky
+    doesn't include type, so we fetch it once and cache it for a long time."""
+    h = (icao24 or "").strip().lower()
+    if len(h) < 6:
+        return ""
+    now = time.time()
+    c = _actype_cache.get(h)
+    if c and now < c[0]:
+        return c[1]
+    code = ""
+    try:
+        url = "https://api.adsbdb.com/v0/aircraft/" + urllib.parse.quote(h)
+        with urllib.request.urlopen(url, timeout=15) as resp:
+            j = json.load(resp)
+        ac = (j.get("response") or {}).get("aircraft") or {}
+        code = (ac.get("icao_type") or ac.get("type") or "").strip()
+    except Exception:
+        code = ""
+    _actype_cache[h] = (now + (7 * 86400 if code else 1800), code)   # 7 days good, 30 min empty
+    return code
+
+
 def adsbdb_route(cs):
     cs = (cs or "").strip()
     if len(cs) < 3:
@@ -417,6 +634,7 @@ def opensky_nearby():
             continue
         cs = (st[1] or "").strip()
         rt = adsbdb_route(cs)
+        rt = validate_route(rt, lat, lon, int(st[10]) if st[10] is not None else None)
         recs.append({
             "cs": cs or st[0],
             "alt": round((st[7] or st[13] or 0) * 3.28084),
@@ -425,7 +643,7 @@ def opensky_nearby():
             "lat": lat, "lon": lon,
             "oc": rt.get("oc", ""), "ocity": rt.get("ocity", ""),
             "dc": rt.get("dc", ""), "dcity": rt.get("dcity", ""),
-            "type": "", "aiata": rt.get("aiata", ""),
+            "type": adsbdb_aircraft(st[0]), "aiata": rt.get("aiata", ""),
             "squawk": (st[14] if len(st) > 14 else ""),
         })
     return recs
@@ -436,17 +654,26 @@ def opensky_tracked():
     if not flt:
         raise RuntimeError("No flight set to track")
     j = opensky_states()
+    flt_norm = flt.replace(" ", "")
     matches = [st for st in (j.get("states") or [])
-               if (st[1] or "").strip().upper() == flt]
+               if (st[1] or "").strip().upper().replace(" ", "") == flt_norm]
     if not matches:
         return []
-    # Prefer an airborne entry with a valid position over grounded/stale duplicates.
-    good = [st for st in matches
-            if not st[8] and st[5] is not None and st[6] is not None]
-    match = (good or matches)[0]
+    # Only track a flight that is actually airborne with a live position. A flight
+    # still on the ground (not taken off) or with no position is not "tracked" -
+    # returning [] makes the display honestly show it isn't airborne yet.
+    airborne = [st for st in matches
+                if not st[8] and st[5] is not None and st[6] is not None
+                and (st[7] or st[13])]            # has a barometric/geo altitude
+    if not airborne:
+        return []
+    # If several share the callsign, take the one with the most recent contact.
+    airborne.sort(key=lambda st: st[4] or 0, reverse=True)
+    match = airborne[0]
     cs = (match[1] or "").strip()
     flat, flon = match[6], match[5]
     rt = adsbdb_route(cs)
+    rt = validate_route(rt, flat, flon, int(match[10]) if (flat is not None and match[10] is not None) else None)
     progress = 0
     olat, olon = rt.get("olat"), rt.get("olon")
     dlat, dlon = rt.get("dlat"), rt.get("dlon")
@@ -461,7 +688,7 @@ def opensky_tracked():
         "lat": flat, "lon": flon,
         "oc": rt.get("oc", ""), "ocity": rt.get("ocity", ""),
         "dc": rt.get("dc", ""), "dcity": rt.get("dcity", ""),
-        "type": "", "aiata": rt.get("aiata", ""),
+        "type": adsbdb_aircraft(match[0]), "aiata": rt.get("aiata", ""),
         "squawk": (match[14] if len(match) > 14 else ""),
         "progress": progress, "eta": -1,
     }]
@@ -583,12 +810,20 @@ def finalize(recs, track=False):
         if favT and typ and typ not in favT:
             continue
         flat, flon = r.get("lat"), r.get("lon")
+        route_from = place(r, "o")
+        route_to = place(r, "d")
+        has_route = bool(route_from or route_to)
+        logo = fetch_logo(r.get("aiata", ""))
+        if get("hide_no_route") and not has_route:
+            continue
+        if get("hide_no_logo") and not logo:
+            continue
         item = {
             "cs": cs, "alt": r.get("alt", 0), "spd": r.get("spd", 0),
             "trk": r.get("trk", 0), "vr": r.get("vr", 0),
             "dist": round(haversine(clat, clon, flat, flon)) if flat is not None else 0,
-            "from": place(r, "o"), "to": place(r, "d"),
-            "type": r.get("type", ""), "logo": fetch_logo(r.get("aiata", "")),
+            "from": route_from, "to": route_to,
+            "type": type_name(r.get("type", "")), "logo": logo,
         }
         if hl_on:
             sq = str(r.get("squawk") or "")
@@ -599,6 +834,7 @@ def finalize(recs, track=False):
         if track:
             item["progress"] = r.get("progress", 0)
             item["eta"] = r.get("eta", -1)
+            item["over"] = nearest_city(flat, flon)
             p = item["progress"]
             item["status"] = ("ARRIVING" if p >= 99 or (0 <= item["eta"] <= 2)
                               else "DEPARTING" if p <= 1 else "EN ROUTE")
@@ -711,21 +947,34 @@ def current_rotate_screen():
 
 def fetch_data():
     global _active_source
-    mode = effective_mode()
-    if mode in ("clock", "world", "world4", "weather", "picture"):
-        _active_source = get("data_source")
-        return []
+    real_mode = get("mode")
+    # In rotate mode, decide what to fetch from the rotation list (not the current
+    # sub-screen) so the nearby/track screen has data ready when rotation reaches it.
+    if real_mode == "rotate":
+        screens = rotate_list()
+        if "track" in screens:
+            fetch_mode = "track"
+        elif "nearby" in screens:
+            fetch_mode = "nearby"
+        else:
+            _active_source = get("data_source")
+            return []
+    else:
+        fetch_mode = effective_mode()
+        if fetch_mode in ("clock", "world", "world4", "weather", "picture"):
+            _active_source = get("data_source")
+            return []
     src = get("data_source")
-    table = TRACKED if mode == "track" else NEARBY
+    table = TRACKED if fetch_mode == "track" else NEARBY
     try:
-        res = finalize(table.get(src, fr24_nearby)(), track=(mode == "track"))
+        res = finalize(table.get(src, fr24_nearby)(), track=(fetch_mode == "track"))
         _active_source = src
         return res
     except Exception as e:
         # auto-fallback to the free OpenSky source if the chosen one fails
         if get("auto_fallback") and src != "opensky":
             print(f"[{time.strftime('%H:%M:%S')}] {src} FAILED ({e}) -> falling back to OpenSky")
-            res = finalize(table["opensky"](), track=(mode == "track"))
+            res = finalize(table["opensky"](), track=(fetch_mode == "track"))
             _active_source = "opensky (fallback from " + src + ")"
             return res
         raise
@@ -1129,6 +1378,8 @@ hr{border:0;border-top:1px solid var(--line);margin:16px 0}
       <option value=city>City name</option><option value=code>Airport code</option></select></div>
     <label class=chk><input id=airline_only type=checkbox><span>Hide private / GA flights</span></label>
     <label class=chk><input id=highlight_special type=checkbox><span>Highlight emergency / military</span></label>
+    <label class=chk><input id=hide_no_route type=checkbox><span>Skip flights with no known route</span></label>
+    <label class=chk><input id=hide_no_logo type=checkbox><span>Skip flights with no airline logo</span></label>
     <div class=field style="margin-top:10px"><label>Only these airlines (blank = all)</label><input id=fav_airlines placeholder="UA, AAL, DL"></div>
     <div class=field><label>Only these aircraft types (blank = all)</label><input id=fav_types placeholder="B738, A320"></div>
   </div>
@@ -1146,9 +1397,9 @@ hr{border:0;border-top:1px solid var(--line);margin:16px 0}
 <div class=toast id=toast>Saved</div>
 <script>
 const $=id=>document.getElementById(id);
-const FIELDS=["data_source","fr24_token","opensky_client_id","opensky_client_secret","flightaware_api_key","mode","track_flight","center_lat","center_lon","radius_km","max_aircraft","cycle_sec","refresh_sec","place_style","airline_only","auto_fallback","highlight_special","show_weather","fav_airlines","fav_types","show_clock","clock24h","rainbow","night_mode","night_start","night_end","night_brightness","night_to_clock","clock_date","date_format","rotate_sec","ical_url","text_color","brightness","show_border","show_logos","logo_px"];
+const FIELDS=["data_source","fr24_token","opensky_client_id","opensky_client_secret","flightaware_api_key","mode","track_flight","center_lat","center_lon","radius_km","max_aircraft","cycle_sec","refresh_sec","place_style","airline_only","auto_fallback","highlight_special","show_weather","fav_airlines","fav_types","show_clock","clock24h","rainbow","night_mode","night_start","night_end","night_brightness","night_to_clock","clock_date","date_format","rotate_sec","ical_url","hide_no_route","hide_no_logo","text_color","brightness","show_border","show_logos","logo_px"];
 const NUM=["center_lat","center_lon","radius_km","max_aircraft","cycle_sec","refresh_sec","brightness","logo_px","night_brightness","rotate_sec"];
-const BOOL=["airline_only","auto_fallback","highlight_special","show_weather","show_clock","clock24h","rainbow","night_mode","night_to_clock","clock_date","show_border","show_logos"];
+const BOOL=["airline_only","auto_fallback","highlight_special","show_weather","show_clock","clock24h","rainbow","night_mode","night_to_clock","clock_date","show_border","show_logos","hide_no_route","hide_no_logo"];
 const CREDS=["fr24_token","opensky_client_id","opensky_client_secret","flightaware_api_key"];
 const ROTOPTS=[["nearby","Nearby flights"],["track","Tracked flight"],["clock","Clock"],["world","World clock"],["world4","World clock x4"],["weather","Weather"],["picture","Picture"]];
 $('rotopts').innerHTML=ROTOPTS.map(o=>`<label class=chk><input type=checkbox class=rotcb value="${o[0]}"><span>${o[1]}</span></label>`).join('');
