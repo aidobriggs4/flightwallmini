@@ -54,8 +54,15 @@ DEFAULTS = {
     "clock24h": False,                # 24-hour vs 12-hour clock
     "rainbow": False,                  # cycle the text through rainbow colors
     "night_mode": False,               # auto-dim during night hours
-    "night_start": "22:00",            # HH:MM local
+    "night_start": "22:00",            # HH:MM local (fallback if schedule off)
     "night_end": "07:00",              # HH:MM local
+    "night_use_schedule": False,       # use the per-day schedule below instead
+    # Mon..Sun: each [enabled, start, end]
+    "night_schedule": [
+        [True, "22:00", "07:00"], [True, "22:00", "07:00"], [True, "22:00", "07:00"],
+        [True, "22:00", "07:00"], [True, "23:00", "08:00"], [True, "23:00", "08:00"],
+        [True, "22:00", "07:00"],
+    ],
     "night_brightness": 15,            # brightness during night (0-255)
     "night_to_clock": False,           # switch to clock-only during night window
     "clock_date": True,                # show date on the clock-only screen
@@ -72,6 +79,15 @@ DEFAULTS = {
     "cycle_sec": 8,                   # seconds each plane is shown (display only, not API)
     "hide_no_route": False,           # skip flights with no known route
     "hide_no_logo": False,            # skip flights with no airline logo
+    "show_commercial": True,          # aircraft category filters
+    "show_small_jet": True,
+    "show_light": True,
+    "show_helicopter": True,
+    "show_military": True,
+    "show_unknown": True,
+    "track_flights": "",              # comma callsigns for multi/quad tracking
+    "use_bounds": False,              # use a custom lat/lon box instead of radius
+    "bound_n": 34.2, "bound_s": 33.4, "bound_e": -117.2, "bound_w": -118.2,
 }
 
 _settings = dict(DEFAULTS)
@@ -91,6 +107,8 @@ _picture = ""         # base64 RGB565 128x64 image for picture mode
 _picture_ver = 0
 _rotate_last = ""
 PICTURE_FILE = os.environ.get("FLIGHTWALL_PICTURE", os.path.join(HERE, "picture.b64"))
+PRESETS_FILE = os.environ.get("FLIGHTWALL_PRESETS", os.path.join(HERE, "presets.json"))
+_presets = {}   # name -> dict of setting overrides
 _logo_cache = {}
 _airport_cache = {}
 _route_cache = {}
@@ -193,6 +211,8 @@ def is_airline_callsign(cs):
 
 
 def bbox():
+    if get("use_bounds"):
+        return (get("bound_n"), get("bound_s"), get("bound_w"), get("bound_e"))  # N,S,W,E
     lat, lon, rad = get("center_lat"), get("center_lon"), get("radius_km")
     dlat = rad / 111.0
     dlon = rad / (111.0 * max(0.1, math.cos(math.radians(lat))))
@@ -342,6 +362,39 @@ def type_name(code):
     if not code:
         return ""
     return AIRCRAFT_TYPES.get(code, code)
+
+
+# Aircraft categories for filtering.
+HELI_CODES = {"H60", "UH60", "S70", "H47", "CH47", "H64", "AS50", "AS55", "A139", "A169",
+              "A189", "EC30", "EC35", "EC45", "EC75", "H500", "B06", "B407", "B412", "B429",
+              "R22", "R44", "R66", "S76", "S92", "AS65", "H160"}
+BIZJET_CODES = {"C25A", "C25B", "C56X", "C500", "C510", "C525", "C550", "C560", "C680", "C700",
+                "C750", "C68A", "CL30", "CL35", "CL60", "GLF4", "GLF5", "GLF6", "G280", "GL5T", "GLEX",
+                "LJ35", "LJ45", "LJ60", "F2TH", "FA7X", "FA8X", "H25B", "PC24", "E135", "E145"}
+LIGHT_CODES = {"C172", "C152", "C182", "C206", "C208", "PC12", "TBM9", "DA42", "BE20", "BE30",
+               "BE36", "B350", "SR22", "SR20", "P28A", "PA34", "AT43", "AT45", "AT72", "AT75",
+               "AT76", "DH8A", "DH8B", "DH8C", "DH8D", "SF34", "SB20"}
+MIL_CODES = {"C17", "C130", "C30J", "C5M", "K35R", "KC46", "E3TF", "E6", "P8", "C40", "C32",
+             "VC25", "F16", "F15", "F18", "F22", "F35", "A10", "B52", "B1", "B2", "C12",
+             "C146", "U2", "E2", "C2", "T6", "T38", "A400", "C295", "C27J"}
+
+
+def classify(type_code, cs):
+    """Bucket an aircraft into one of the filter categories."""
+    t = (type_code or "").strip().upper()
+    if t in HELI_CODES:
+        return "helicopter"
+    if t in MIL_CODES or (cs and airline_code(cs) in MIL_PREFIXES):
+        return "military"
+    if t in BIZJET_CODES:
+        return "small_jet"
+    if t in LIGHT_CODES:
+        return "light"
+    if not t:
+        return "unknown" if not is_airline_callsign(cs) else "commercial"
+    if t in AIRCRAFT_TYPES or is_airline_callsign(cs):
+        return "commercial"
+    return "unknown"
 
 
 # Major world cities (lat, lon, name) for the tracker's "Flying over" line.
@@ -798,8 +851,16 @@ def finalize(recs, track=False):
     favA, favT = _csv_set("fav_airlines"), _csv_set("fav_types")
     hl_on = get("highlight_special")
     out = []
+    cat_on = {
+        "commercial": get("show_commercial"), "small_jet": get("show_small_jet"),
+        "light": get("show_light"), "helicopter": get("show_helicopter"),
+        "military": get("show_military"), "unknown": get("show_unknown"),
+    }
     for r in recs:
         cs = r.get("cs", "")
+        cat = classify(r.get("type", ""), cs)
+        if not cat_on.get(cat, True):
+            continue
         if get("airline_only") and not is_airline_callsign(cs):
             continue
         aiata = (r.get("aiata") or "").upper()
@@ -823,7 +884,7 @@ def finalize(recs, track=False):
             "trk": r.get("trk", 0), "vr": r.get("vr", 0),
             "dist": round(haversine(clat, clon, flat, flon)) if flat is not None else 0,
             "from": route_from, "to": route_to,
-            "type": type_name(r.get("type", "")), "logo": logo,
+            "type": type_name(r.get("type", "")), "logo": logo, "cat": cat,
         }
         if hl_on:
             sq = str(r.get("squawk") or "")
@@ -945,6 +1006,26 @@ def current_rotate_screen():
 
 
 
+def multi_track():
+    """Fetch up to 4 specific flights (from track_flights) for the quad screen."""
+    src = get("data_source")
+    fn = TRACKED.get(src, fr24_tracked)
+    names = [c.strip() for c in get("track_flights").split(",") if c.strip()][:4]
+    saved = get("track_flight")
+    out = []
+    for cs in names:
+        _settings["track_flight"] = cs           # tracked fns read this setting
+        try:
+            recs = finalize(fn(), track=True)
+        except Exception:
+            recs = []
+        out.append(recs[0] if recs else
+                   {"cs": cs, "from": "", "to": "", "logo": "", "progress": 0,
+                    "status": "", "alt": 0, "spd": 0, "over": ""})
+    _settings["track_flight"] = saved
+    return out
+
+
 def fetch_data():
     global _active_source
     real_mode = get("mode")
@@ -961,6 +1042,9 @@ def fetch_data():
             return []
     else:
         fetch_mode = effective_mode()
+        if fetch_mode == "quad":
+            _active_source = get("data_source")
+            return multi_track()
         if fetch_mode in ("clock", "world", "world4", "weather", "picture"):
             _active_source = get("data_source")
             return []
@@ -999,15 +1083,26 @@ def refresh_loop():
         _refresh_now.clear()
 
 
+def _in_window(now, s, e):
+    if s == e:
+        return False
+    if s < e:
+        return s <= now < e
+    return now >= s or now < e
+
+
 def _is_night():
     try:
-        now = datetime.datetime.now().strftime("%H:%M")
-        s, e = get("night_start"), get("night_end")
-        if s == e:
+        n = datetime.datetime.now()
+        now = n.strftime("%H:%M")
+        if get("night_use_schedule"):
+            sched = get("night_schedule") or []
+            wd = n.weekday()               # 0=Mon .. 6=Sun
+            if wd < len(sched):
+                on, s, e = sched[wd]
+                return bool(on) and _in_window(now, s, e)
             return False
-        if s < e:                      # same-day window (e.g. 01:00-06:00)
-            return s <= now < e
-        return now >= s or now < e     # overnight window (e.g. 22:00-07:00)
+        return _in_window(now, get("night_start"), get("night_end"))
     except Exception:
         return False
 
@@ -1143,6 +1238,54 @@ def format_date(fmt):
         "day_month_year":    f"{d} {mon} {y}",
     }
     return table.get(fmt, table["month_day_year"])
+
+
+def load_presets():
+    global _presets
+    try:
+        if os.path.exists(PRESETS_FILE):
+            with open(PRESETS_FILE) as f:
+                _presets = json.load(f)
+    except Exception:
+        _presets = {}
+
+
+def save_presets():
+    try:
+        with open(PRESETS_FILE, "w") as f:
+            json.dump(_presets, f)
+    except Exception:
+        pass
+
+
+# Which settings a preset captures (look + display feel, not credentials/location).
+PRESET_KEYS = ["text_color", "brightness", "rainbow", "show_border", "show_logos", "logo_px",
+               "mode", "clock24h", "clock_date", "date_format", "show_weather", "world_zones",
+               "rotate_screens", "rotate_sec", "cycle_sec", "night_mode", "night_brightness",
+               "show_commercial", "show_small_jet", "show_light", "show_helicopter",
+               "show_military", "show_unknown", "highlight_special"]
+
+
+def preset_save(name):
+    with _settings_lock:
+        _presets[name] = {k: _settings.get(k) for k in PRESET_KEYS if k in _settings}
+    save_presets()
+
+
+def preset_apply(name):
+    global _version
+    p = _presets.get(name)
+    if not p:
+        return False
+    with _settings_lock:
+        for k, v in p.items():
+            if k in DEFAULTS:
+                _settings[k] = v
+    save_settings()
+    with _data_lock:
+        _version += 1
+    _refresh_now.set()
+    return True
 
 
 def load_picture():
@@ -1566,6 +1709,9 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/picture":
             self._send(200, "application/json", json.dumps({"pv": _picture_ver, "img": _picture}))
             return
+        if path == "/api/presets":
+            self._send(200, "application/json", json.dumps({"presets": sorted(_presets.keys())}))
+            return
         if path == "/flights":
             global _device_ip, _device_last
             _device_ip = self.client_address[0]
@@ -1621,6 +1767,41 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         global _version
+        if self.path == "/api/reset":
+            try:
+                with _settings_lock:
+                    for k, v in DEFAULTS.items():
+                        _settings[k] = v.copy() if isinstance(v, (list, dict)) else v
+                save_settings()
+                with _data_lock:
+                    _version += 1
+                _refresh_now.set()
+                self._send(200, "application/json", json.dumps({"ok": True}))
+            except Exception as e:
+                self._send(400, "application/json", json.dumps({"ok": False, "error": str(e)}))
+            return
+        if self.path == "/api/presets":
+            try:
+                n = int(self.headers.get("Content-Length", 0))
+                body = json.loads(self.rfile.read(n).decode() or "{}")
+                action = body.get("action", "save")
+                name = (body.get("name") or "").strip()
+                if not name:
+                    self._send(400, "application/json", json.dumps({"ok": False, "error": "no name"}))
+                    return
+                if action == "save":
+                    preset_save(name)
+                elif action == "apply":
+                    if not preset_apply(name):
+                        self._send(404, "application/json", json.dumps({"ok": False, "error": "not found"}))
+                        return
+                elif action == "delete":
+                    _presets.pop(name, None)
+                    save_presets()
+                self._send(200, "application/json", json.dumps({"ok": True, "presets": sorted(_presets.keys())}))
+            except Exception as e:
+                self._send(400, "application/json", json.dumps({"ok": False, "error": str(e)}))
+            return
         if self.path == "/api/picture":
             try:
                 n = int(self.headers.get("Content-Length", 0))
@@ -1672,6 +1853,7 @@ def local_ip():
 if __name__ == "__main__":
     load_settings()
     load_picture()
+    load_presets()
     threading.Thread(target=refresh_loop, daemon=True).start()
     ip, port = local_ip(), get("port")
     print("=" * 56)
