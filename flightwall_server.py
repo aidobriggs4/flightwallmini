@@ -105,6 +105,7 @@ _device_last = 0      # when the ESP32 last fetched /flights
 
 # ---- server log: in-memory ring + size-capped file + stdout -----------------
 import collections
+import subprocess
 _log_buf = collections.deque(maxlen=300)
 _log_lock = threading.Lock()
 LOG_FILE = os.environ.get("FLIGHTWALL_LOG", os.path.join(HERE, "flightwall.log"))
@@ -2118,6 +2119,23 @@ def local_ip():
         return "127.0.0.1"
 
 
+def advertise_bonjour(port):
+    """Advertise _flightwall._tcp so the phone app can auto-find the Pi.
+    Uses avahi (built into Raspberry Pi OS). Best-effort: if avahi isn't
+    present, discovery just won't work and the user types the IP instead."""
+    import shutil
+    if not shutil.which("avahi-publish-service"):
+        return
+    try:
+        p = subprocess.Popen(
+            ["avahi-publish-service", "FlightWall", "_flightwall._tcp", str(port)],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        globals()["_bonjour_proc"] = p        # keep a ref so it isn't GC'd
+        log("advertising on the network as FlightWall (_flightwall._tcp)")
+    except Exception as e:
+        log(f"bonjour advertise skipped: {e}")
+
+
 if __name__ == "__main__":
     load_settings()
     load_picture()
@@ -2126,6 +2144,7 @@ if __name__ == "__main__":
     log(f"server started (source={get('data_source')}, mode={get('mode')})")
     threading.Thread(target=refresh_loop, daemon=True).start()
     ip, port = local_ip(), get("port")
+    advertise_bonjour(port)
     print("=" * 56)
     print("  FlightWall Mini  -  server + dashboard")
     print("=" * 56)
