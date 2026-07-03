@@ -102,6 +102,27 @@ _last_update = 0
 _last_error = ""
 _device_ip = ""
 _device_last = 0      # when the ESP32 last fetched /flights
+
+# ---- server log: in-memory ring + size-capped file + stdout -----------------
+import collections
+_log_buf = collections.deque(maxlen=300)
+_log_lock = threading.Lock()
+LOG_FILE = os.environ.get("FLIGHTWALL_LOG", os.path.join(HERE, "flightwall.log"))
+LOG_MAX_BYTES = 512 * 1024
+
+
+def log(msg):
+    line = f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] {msg}"
+    with _log_lock:
+        _log_buf.append(line)
+    print(line, flush=True)
+    try:
+        if os.path.exists(LOG_FILE) and os.path.getsize(LOG_FILE) > LOG_MAX_BYTES:
+            os.replace(LOG_FILE, LOG_FILE + ".old")     # keep one previous file
+        with open(LOG_FILE, "a") as f:
+            f.write(line + "\n")
+    except Exception:
+        pass
 _version = 1          # bumps on every settings change or data refresh (for instant ESP polling)
 _active_source = ""   # the source actually used last (may differ if fallback kicked in)
 _weather = {"txt": "", "exp": 0}
@@ -111,6 +132,8 @@ _rotate_last = ""
 PICTURE_FILE = os.environ.get("FLIGHTWALL_PICTURE", os.path.join(HERE, "picture.b64"))
 PRESETS_FILE = os.environ.get("FLIGHTWALL_PRESETS", os.path.join(HERE, "presets.json"))
 _presets = {}   # name -> dict of setting overrides
+BLOCKED_FILE = os.environ.get("FLIGHTWALL_BLOCKED", os.path.join(HERE, "blocked.json"))
+_blocked = {}   # callsign(upper) -> unix expiry (end of the local day it was blocked)
 _logo_cache = {}
 _airport_cache = {}
 _route_cache = {}
@@ -159,7 +182,7 @@ def save_settings():
     try:
         _atomic_write(SETTINGS_FILE, json.dumps(snap, indent=2))
     except Exception as e:
-        print(f"[{time.strftime('%H:%M:%S')}] settings save failed: {e}")
+        log(f"settings save failed: {e}")
 
 
 def get(k):
@@ -903,8 +926,11 @@ def finalize(recs, track=False):
         "light": get("show_light"), "helicopter": get("show_helicopter"),
         "military": get("show_military"), "unknown": get("show_unknown"),
     }
+    purge_blocked()
     for r in recs:
         cs = r.get("cs", "")
+        if _blocked and cs.strip().upper() in _blocked:
+            continue
         cat = classify(r.get("type", ""), cs)
         if not cat_on.get(cat, True):
             continue
@@ -1108,7 +1134,7 @@ def fetch_data():
     except Exception as e:
         # auto-fallback to the free OpenSky source if the chosen one fails
         if get("auto_fallback") and src != "opensky":
-            print(f"[{time.strftime('%H:%M:%S')}] {src} FAILED ({e}) -> falling back to OpenSky")
+            log(f"{src} FAILED ({e}) -> falling back to OpenSky")
             res = finalize(table["opensky"](), track=(fetch_mode == "track"))
             _active_source = "opensky (fallback from " + src + ")"
             return res
@@ -1125,11 +1151,11 @@ def refresh_loop():
                 _last_update = time.time()
                 _last_error = ""
                 _version += 1
-            print(f"[{time.strftime('%H:%M:%S')}] source={_active_source}  mode={effective_mode()}  -> {len(ac)} aircraft")
+            log(f"source={_active_source}  mode={effective_mode()}  -> {len(ac)} aircraft")
         except Exception as e:
             with _data_lock:
                 _last_error = str(e)
-            print(f"[{time.strftime('%H:%M:%S')}] fetch error: {e}")
+            log(f"fetch error: {e}")
         _refresh_now.wait(timeout=get("refresh_sec"))
         _refresh_now.clear()
 
@@ -1305,7 +1331,7 @@ def save_presets():
     try:
         _atomic_write(PRESETS_FILE, json.dumps(_presets))
     except Exception as e:
-        print(f"[{time.strftime('%H:%M:%S')}] presets save failed: {e}")
+        log(f"presets save failed: {e}")
 
 
 # Which settings a preset captures (look + display feel, not credentials/location).
@@ -1336,6 +1362,42 @@ def preset_apply(name):
         _version += 1
     _refresh_now.set()
     return True
+
+
+def load_blocked():
+    global _blocked
+    try:
+        if os.path.exists(BLOCKED_FILE):
+            with open(BLOCKED_FILE) as f:
+                _blocked = {k.upper(): float(v) for k, v in json.load(f).items()}
+    except Exception:
+        _blocked = {}
+
+
+def save_blocked():
+    try:
+        _atomic_write(BLOCKED_FILE, json.dumps(_blocked))
+    except Exception:
+        pass
+
+
+def _end_of_today():
+    n = datetime.datetime.now()
+    return (datetime.datetime(n.year, n.month, n.day) + datetime.timedelta(days=1)).timestamp()
+
+
+def purge_blocked():
+    now = time.time()
+    dead = [k for k, exp in _blocked.items() if now >= exp]
+    for k in dead:
+        _blocked.pop(k, None)
+    if dead:
+        save_blocked()
+
+
+def is_blocked(cs):
+    purge_blocked()
+    return (cs or "").strip().upper() in _blocked
 
 
 def load_picture():
@@ -1615,6 +1677,9 @@ hr{border:0;border-top:1px solid var(--line);margin:16px 0}
 </div>
 
 <div class=panel data-tab=device>
+  <div class=card><h2>Server log</h2>
+    <pre id=logbox style="background:var(--card2);border:1px solid var(--line);border-radius:10px;padding:10px;max-height:260px;overflow:auto;font-size:11px;line-height:1.5;white-space:pre-wrap;margin:0"></pre>
+  </div>
   <div class=card><h2>Status</h2><div id=health class=sub>checking...</div></div>
   <div class=card><h2>About</h2>
     <div class=note>This dashboard, the iOS app, and the wall all stay in sync automatically. Changes here appear on the others within a few seconds.</div>
@@ -1740,7 +1805,17 @@ async function refresh(){
       : '<div class=empty>No aircraft nearby right now.</div>';
   }catch(e){ $('status').textContent='server unreachable'; }
 }
-loadSettings(); refresh(); loadPresets(); setInterval(refresh,3000);
+async function loadLog(){
+  try{
+    const d=await (await fetch('/api/log')).json();
+    const el=$('logbox');
+    const stick = el.scrollTop + el.clientHeight >= el.scrollHeight - 8;
+    el.textContent=(d.log||[]).join('\n');
+    if(stick) el.scrollTop=el.scrollHeight;
+  }catch(e){}
+}
+loadSettings(); refresh(); loadPresets(); loadLog();
+setInterval(refresh,3000); setInterval(loadLog,5000);
 let lastTouch=0;
 document.addEventListener('input',()=>{ lastTouch=Date.now(); });
 async function syncSettings(){
@@ -1820,10 +1895,24 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/presets":
             self._send(200, "application/json", json.dumps({"presets": sorted(_presets.keys())}))
             return
+        if path == "/api/blocked":
+            purge_blocked()
+            self._send(200, "application/json", json.dumps({"blocked": sorted(_blocked.keys())}))
+            return
+        if path == "/api/log":
+            with _log_lock:
+                lines = list(_log_buf)
+            self._send(200, "application/json", json.dumps({"log": lines}))
+            return
         if path == "/flights":
             global _device_ip, _device_last
+            was = _device_last
             _device_ip = self.client_address[0]
             _device_last = time.time()
+            if was == 0:
+                log(f"display connected ({self.client_address[0]})")
+            elif _device_last - was > 120:
+                log(f"display reconnected after {int(_device_last - was)}s ({self.client_address[0]})")
             with _data_lock:
                 body = json.dumps({"v": _version, "config": config_obj(), "aircraft": _aircraft})
             self._send(200, "application/json", body)
@@ -1881,10 +1970,35 @@ class Handler(BaseHTTPRequestHandler):
                     for k, v in DEFAULTS.items():
                         _settings[k] = v.copy() if isinstance(v, (list, dict)) else v
                 save_settings()
+                log("settings reset to defaults")
                 with _data_lock:
                     _version += 1
                 _refresh_now.set()
                 self._send(200, "application/json", json.dumps({"ok": True}))
+            except Exception as e:
+                self._send(400, "application/json", json.dumps({"ok": False, "error": str(e)}))
+            return
+        if self.path == "/api/blocked":
+            try:
+                n = int(self.headers.get("Content-Length", 0))
+                body = json.loads(self.rfile.read(n).decode() or "{}")
+                cs = (body.get("cs") or "").strip().upper()
+                action = body.get("action", "add")
+                if not cs:
+                    self._send(400, "application/json", json.dumps({"ok": False, "error": "no callsign"}))
+                    return
+                if action == "add":
+                    _blocked[cs] = _end_of_today()
+                    log(f"flight hidden for today: {cs}")
+                else:
+                    _blocked.pop(cs, None)
+                    log(f"flight unhidden: {cs}")
+                save_blocked()
+                with _data_lock:
+                    _version += 1
+                _refresh_now.set()
+                purge_blocked()
+                self._send(200, "application/json", json.dumps({"ok": True, "blocked": sorted(_blocked.keys())}))
             except Exception as e:
                 self._send(400, "application/json", json.dumps({"ok": False, "error": str(e)}))
             return
@@ -1899,13 +2013,16 @@ class Handler(BaseHTTPRequestHandler):
                     return
                 if action == "save":
                     preset_save(name)
+                    log(f"preset saved: {name}")
                 elif action == "apply":
+                    log(f"preset applied: {name}")
                     if not preset_apply(name):
                         self._send(404, "application/json", json.dumps({"ok": False, "error": "not found"}))
                         return
                 elif action == "delete":
                     _presets.pop(name, None)
                     save_presets()
+                    log(f"preset deleted: {name}")
                 self._send(200, "application/json", json.dumps({"ok": True, "presets": sorted(_presets.keys())}))
             except Exception as e:
                 self._send(400, "application/json", json.dumps({"ok": False, "error": str(e)}))
@@ -1928,6 +2045,7 @@ class Handler(BaseHTTPRequestHandler):
             n = int(self.headers.get("Content-Length", 0))
             incoming = json.loads(self.rfile.read(n).decode() or "{}")
             logo_dirty = False
+            changed = []
             with _settings_lock:
                 for k in DEFAULTS:
                     if k in incoming and incoming[k] is not None:
@@ -1937,10 +2055,14 @@ class Handler(BaseHTTPRequestHandler):
                         v = _coerce(k, incoming[k])
                         if v is None:
                             continue                     # wrong type: ignore, don't crash
+                        if _settings.get(k) != v:
+                            changed.append(k)
                         if k in ("logo_px", "show_logos") and _settings.get(k) != v:
                             logo_dirty = True            # only re-fetch logos when needed
                         _settings[k] = v
             save_settings()
+            if changed:
+                log("settings changed: " + ", ".join(changed))
             if logo_dirty:
                 _logo_cache.clear()
             with _data_lock:
@@ -2000,6 +2122,8 @@ if __name__ == "__main__":
     load_settings()
     load_picture()
     load_presets()
+    load_blocked()
+    log(f"server started (source={get('data_source')}, mode={get('mode')})")
     threading.Thread(target=refresh_loop, daemon=True).start()
     ip, port = local_ip(), get("port")
     print("=" * 56)
