@@ -43,7 +43,7 @@ DEFAULTS = {
     "flightaware_api_key": "",
     "place_style": "city",             # code | city
     "airline_only": False,
-    "text_color": "#ff8c00",
+    "text_color": "#38BDF8",
     "brightness": 90,
     "show_border": False,
     "show_logos": True,
@@ -88,6 +88,8 @@ DEFAULTS = {
     "track_flights": "",              # comma callsigns for multi/quad tracking
     "use_bounds": False,              # use a custom lat/lon box instead of radius
     "bound_n": 34.2, "bound_s": 33.4, "bound_e": -117.2, "bound_w": -118.2,
+    "unit_dist": "km",                # km | mi
+    "unit_speed": "mph",              # mph | kmh | kt
 }
 
 _settings = dict(DEFAULTS)
@@ -114,6 +116,14 @@ _airport_cache = {}
 _route_cache = {}
 _actype_cache = {}   # icao24 -> ICAO type code (type never changes, cache long)
 _os_token = {"val": None, "exp": 0}
+CACHE_MAX = 3000     # per-cache entry cap so a 24/7 server can't grow unbounded
+
+
+def _cap(cache):
+    """Drop the oldest ~20% of entries when a cache exceeds CACHE_MAX."""
+    if len(cache) > CACHE_MAX:
+        for k in list(cache.keys())[: CACHE_MAX // 5]:
+            cache.pop(k, None)
 
 # Credential fields: masked in GET, and never overwritten by a blank on POST.
 CRED_KEYS = {"fr24_token", "opensky_client_id", "opensky_client_secret", "flightaware_api_key"}
@@ -133,11 +143,23 @@ def load_settings():
             print("could not read settings.json:", e)
 
 
+def _atomic_write(path, text):
+    """Write via a temp file + rename so a power cut can't corrupt the file."""
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        f.write(text)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, path)
+
+
 def save_settings():
     with _settings_lock:
         snap = dict(_settings)
-    with open(SETTINGS_FILE, "w") as f:
-        json.dump(snap, f, indent=2)
+    try:
+        _atomic_write(SETTINGS_FILE, json.dumps(snap, indent=2))
+    except Exception as e:
+        print(f"[{time.strftime('%H:%M:%S')}] settings save failed: {e}")
 
 
 def get(k):
@@ -219,6 +241,27 @@ def bbox():
     return (lat + dlat, lat - dlat, lon - dlon, lon + dlon)   # N, S, W, E
 
 
+def conv_speed(mph):
+    u = get("unit_speed")
+    if u == "kmh":
+        return round(mph * 1.60934)
+    if u == "kt":
+        return round(mph / 1.15078)
+    return round(mph)
+
+
+def speed_label():
+    return {"kmh": "km/h", "kt": "kt"}.get(get("unit_speed"), "mph")
+
+
+def conv_dist(km):
+    return round(km * 0.621371) if get("unit_dist") == "mi" else round(km)
+
+
+def dist_label():
+    return "mi" if get("unit_dist") == "mi" else "km"
+
+
 def eta_minutes(ts):
     if not ts:
         return -1
@@ -268,6 +311,7 @@ def fetch_logo(iata):
         except Exception:
             continue
     _logo_cache[ck] = b64
+    _cap(_logo_cache)
     return b64
 
 
@@ -514,6 +558,7 @@ def airport_info(code):
         except Exception:
             info = (code, None, None)
     _airport_cache[code] = info
+    _cap(_airport_cache)
     return info
 
 
@@ -638,6 +683,7 @@ def adsbdb_aircraft(icao24):
     except Exception:
         code = ""
     _actype_cache[h] = (now + (7 * 86400 if code else 1800), code)   # 7 days good, 30 min empty
+    _cap(_actype_cache)
     return code
 
 
@@ -674,6 +720,7 @@ def adsbdb_route(cs):
         r = {}
     # cache good routes for 2h, empty/failed lookups for 10min (so they retry)
     _route_cache[cs] = (now + (7200 if r else 600), r)
+    _cap(_route_cache)
     return r
 
 
@@ -880,9 +927,9 @@ def finalize(recs, track=False):
         if get("hide_no_logo") and not logo:
             continue
         item = {
-            "cs": cs, "alt": r.get("alt", 0), "spd": r.get("spd", 0),
+            "cs": cs, "alt": r.get("alt", 0), "spd": conv_speed(r.get("spd", 0)),
             "trk": r.get("trk", 0), "vr": r.get("vr", 0),
-            "dist": round(haversine(clat, clon, flat, flon)) if flat is not None else 0,
+            "dist": conv_dist(haversine(clat, clon, flat, flon)) if flat is not None else 0,
             "from": route_from, "to": route_to,
             "type": type_name(r.get("type", "")), "logo": logo, "cat": cat,
         }
@@ -1013,16 +1060,20 @@ def multi_track():
     names = [c.strip() for c in get("track_flights").split(",") if c.strip()][:4]
     saved = get("track_flight")
     out = []
-    for cs in names:
-        _settings["track_flight"] = cs           # tracked fns read this setting
-        try:
-            recs = finalize(fn(), track=True)
-        except Exception:
-            recs = []
-        out.append(recs[0] if recs else
-                   {"cs": cs, "from": "", "to": "", "logo": "", "progress": 0,
-                    "status": "", "alt": 0, "spd": 0, "over": ""})
-    _settings["track_flight"] = saved
+    try:
+        for cs in names:
+            with _settings_lock:                 # swap under the lock (no races)
+                _settings["track_flight"] = cs
+            try:
+                recs = finalize(fn(), track=True)
+            except Exception:
+                recs = []
+            out.append(recs[0] if recs else
+                       {"cs": cs, "from": "", "to": "", "logo": "", "progress": 0,
+                        "status": "", "alt": 0, "spd": 0, "over": ""})
+    finally:
+        with _settings_lock:
+            _settings["track_flight"] = saved
     return out
 
 
@@ -1252,10 +1303,9 @@ def load_presets():
 
 def save_presets():
     try:
-        with open(PRESETS_FILE, "w") as f:
-            json.dump(_presets, f)
-    except Exception:
-        pass
+        _atomic_write(PRESETS_FILE, json.dumps(_presets))
+    except Exception as e:
+        print(f"[{time.strftime('%H:%M:%S')}] presets save failed: {e}")
 
 
 # Which settings a preset captures (look + display feel, not credentials/location).
@@ -1340,6 +1390,7 @@ def config_obj():
             "rainbow": bool(get("rainbow")), "date": date_str,
             "weather": get_weather() if get("show_weather") else "",
             "zones": zones, "forecast": forecast, "cal": cal,
+            "spd_u": speed_label(), "dist_u": dist_label(),
             "cycle": int(get("cycle_sec"))}
 
 
@@ -1354,9 +1405,9 @@ DASHBOARD = """<!doctype html><html lang=en><head><meta charset=utf-8>
 <meta name=apple-mobile-web-app-title content="FlightWall">
 <link rel=apple-touch-icon href="/icon.png">
 <style>
-:root{--bg:#0c0e12;--card:#161a21;--line:#262c36;--ink:#e7ecf3;--mut:#8b94a3;--acc:#ff8c00;--ok:#37d07a;--bad:#ff5d5d}
+:root{--bg:#0B1220;--card:#151C2C;--card2:#1D2740;--line:#273349;--ink:#E6EDF7;--mut:#8A97AD;--acc:#38BDF8;--ok:#34D399;--bad:#F87171}
 *{box-sizing:border-box}
-body{margin:0;background:radial-gradient(1200px 600px at 50% -10%,#141925 0,var(--bg) 60%);color:var(--ink);font:15px/1.5 -apple-system,system-ui,sans-serif;padding-bottom:90px}
+body{margin:0;background:radial-gradient(1200px 600px at 50% -10%,#12203A 0,var(--bg) 60%);color:var(--ink);font:15px/1.5 -apple-system,system-ui,sans-serif;padding-bottom:90px}
 .wrap{max-width:760px;margin:0 auto;padding:20px 16px}
 .head{display:flex;align-items:center;gap:11px}
 .logo{width:34px;height:34px;border-radius:9px;background:linear-gradient(135deg,var(--acc),#ff5e00);display:flex;align-items:center;justify-content:center;font-size:18px}
@@ -1374,7 +1425,7 @@ th{text-align:left;color:var(--mut);font-weight:600;font-size:11px;text-transfor
 td{padding:8px}tr:not(:last-child) td{border-bottom:1px solid var(--line)}
 .cs{font-weight:700;color:var(--acc)}.mut{color:var(--mut)}
 .field{margin-bottom:13px}label{display:block;font-size:12px;color:var(--mut);margin-bottom:6px}
-input,select{width:100%;background:#0e1217;border:1px solid var(--line);color:var(--ink);border-radius:9px;padding:10px 11px;font:inherit}
+input,select{width:100%;background:var(--card2);border:1px solid var(--line);color:var(--ink);border-radius:9px;padding:10px 11px;font:inherit}
 input:focus,select:focus{outline:none;border-color:var(--acc)}
 .row2{display:grid;grid-template-columns:1fr 1fr;gap:10px}
 .chk{display:flex;align-items:center;gap:10px;padding:9px 0;cursor:pointer}
@@ -1382,7 +1433,7 @@ input:focus,select:focus{outline:none;border-color:var(--acc)}
 .chk span{font-size:14px;color:var(--ink)}
 .opts{display:grid;grid-template-columns:1fr 1fr;gap:4px 16px}
 button{background:var(--acc);color:#1a1206;border:0;border-radius:11px;padding:12px 16px;font-weight:700;font-size:15px;cursor:pointer;width:100%}
-button.ghost{background:#0e1217;color:var(--ink);border:1px solid var(--line)}
+button.ghost{background:var(--card2);color:var(--ink);border:1px solid var(--line)}
 button:active{transform:translateY(1px)}
 .note{font-size:12px;color:var(--mut);margin-top:8px}
 .savebar{position:fixed;left:0;right:0;bottom:0;background:rgba(12,14,18,.92);backdrop-filter:blur(10px);border-top:1px solid var(--line);padding:12px 16px;z-index:20}
@@ -1393,10 +1444,10 @@ button:active{transform:translateY(1px)}
 hr{border:0;border-top:1px solid var(--line);margin:16px 0}
 .trk .big{font-size:24px;font-weight:800;color:var(--acc)}
 .trk .route{font-size:16px;margin:6px 0 2px}
-.bar{height:12px;background:#0e1217;border:1px solid var(--line);border-radius:7px;overflow:hidden;margin:12px 0 6px}
+.bar{height:12px;background:var(--card2);border:1px solid var(--line);border-radius:7px;overflow:hidden;margin:12px 0 6px}
 .bar>i{display:block;height:100%;background:var(--acc)}
 .trk .meta{display:flex;justify-content:space-between;color:var(--mut);font-size:13px}
-.pill{display:inline-block;font-size:12px;padding:3px 9px;border-radius:20px;background:#0e1217;border:1px solid var(--line);color:var(--mut);margin-right:6px}
+.pill{display:inline-block;font-size:12px;padding:3px 9px;border-radius:20px;background:var(--card2);border:1px solid var(--line);color:var(--mut);margin-right:6px}
 .pill.ok{color:var(--ok);border-color:#1f5e3a}.pill.bad{color:var(--bad);border-color:#5e2020}
 </style></head><body><div class=wrap>
 <div class=head><div class=logo>&#9992;</div><div><h1>FlightWall Mini</h1><div class=sub id=status>starting...</div></div></div>
@@ -1419,13 +1470,15 @@ hr{border:0;border-top:1px solid var(--line);margin:16px 0}
     <div class=field><select id=mode>
       <option value=nearby>Nearby - cycle local flights</option>
       <option value=track>Track - follow one flight</option>
+      <option value=quad>Quad - four flights at once</option>
       <option value=picture>Picture - show uploaded image</option>
       <option value=rotate>Rotate - cycle through screens</option>
       <option value=clock>Clock only</option>
-      <option value=world>World clock</option>
+      <option value=world>World clock (stacked)</option>
       <option value=world4>World clock x4</option>
       <option value=weather>Weather</option></select></div>
     <div class=field id=trackrow><label>Flight to track</label><input id=track_flight placeholder="e.g. UAL123"></div>
+    <div class=field id=quadrow><label>Quad flights (up to 4, comma-separated)</label><input id=track_flights placeholder="UAL123, AAL456, DAL789, SWA012"></div>
   </div>
   <div class=card id=nearbycard><h2>Nearby</h2>
     <div class=row2>
@@ -1489,6 +1542,14 @@ hr{border:0;border-top:1px solid var(--line);margin:16px 0}
     </div>
     <div class=field><label>Night brightness (0-255)</label><input id=night_brightness type=number min=0 max=255></div>
     <label class=chk><input id=night_to_clock type=checkbox><span>At night, switch to clock-only</span></label>
+    <div class=note>Per-day night schedule is editable in the phone app.</div>
+  </div>
+  <div class=card><h2>Scenes (presets)</h2>
+    <div id=presetlist class=opts></div>
+    <div class=row2 style="margin-top:10px">
+      <div class=field><input id=presetname placeholder="New preset name"></div>
+      <button type=button class=ghost onclick=savePreset()>Save current</button>
+    </div>
   </div>
 </div>
 
@@ -1515,6 +1576,31 @@ hr{border:0;border-top:1px solid var(--line);margin:16px 0}
       <div class=field><label>Radius (km)</label><input id=radius_km type=number></div>
       <div class=field><label>Refresh data (s)</label><input id=refresh_sec type=number></div>
     </div>
+    <label class=chk><input id=use_bounds type=checkbox><span>Use a custom box instead of radius</span></label>
+    <div class=row2 bnd=1>
+      <div class=field><label>North lat</label><input id=bound_n type=number step=0.0001></div>
+      <div class=field><label>South lat</label><input id=bound_s type=number step=0.0001></div>
+    </div>
+    <div class=row2 bnd=1>
+      <div class=field><label>East lon</label><input id=bound_e type=number step=0.0001></div>
+      <div class=field><label>West lon</label><input id=bound_w type=number step=0.0001></div>
+    </div>
+  </div>
+  <div class=card><h2>Units</h2>
+    <div class=row2>
+      <div class=field><label>Distance</label><select id=unit_dist>
+        <option value=km>Kilometers (km)</option><option value=mi>Miles (mi)</option></select></div>
+      <div class=field><label>Speed</label><select id=unit_speed>
+        <option value=mph>MPH</option><option value=kmh>km/h</option><option value=kt>Knots</option></select></div>
+    </div>
+  </div>
+  <div class=card><h2>Aircraft categories</h2>
+    <label class=chk><input id=show_commercial type=checkbox><span>Commercial</span></label>
+    <label class=chk><input id=show_small_jet type=checkbox><span>Small jets</span></label>
+    <label class=chk><input id=show_light type=checkbox><span>Light aircraft</span></label>
+    <label class=chk><input id=show_helicopter type=checkbox><span>Helicopter</span></label>
+    <label class=chk><input id=show_military type=checkbox><span>Military</span></label>
+    <label class=chk><input id=show_unknown type=checkbox><span>Unknown</span></label>
   </div>
   <div class=card><h2>Filters</h2>
     <div class=field><label>Show airports as</label><select id=place_style>
@@ -1540,9 +1626,9 @@ hr{border:0;border-top:1px solid var(--line);margin:16px 0}
 <div class=toast id=toast>Saved</div>
 <script>
 const $=id=>document.getElementById(id);
-const FIELDS=["data_source","fr24_token","opensky_client_id","opensky_client_secret","flightaware_api_key","mode","track_flight","center_lat","center_lon","radius_km","max_aircraft","cycle_sec","refresh_sec","place_style","airline_only","auto_fallback","highlight_special","show_weather","fav_airlines","fav_types","show_clock","clock24h","rainbow","night_mode","night_start","night_end","night_brightness","night_to_clock","clock_date","date_format","rotate_sec","ical_url","hide_no_route","hide_no_logo","text_color","brightness","show_border","show_logos","logo_px"];
-const NUM=["center_lat","center_lon","radius_km","max_aircraft","cycle_sec","refresh_sec","brightness","logo_px","night_brightness","rotate_sec"];
-const BOOL=["airline_only","auto_fallback","highlight_special","show_weather","show_clock","clock24h","rainbow","night_mode","night_to_clock","clock_date","show_border","show_logos","hide_no_route","hide_no_logo"];
+const FIELDS=["data_source","fr24_token","opensky_client_id","opensky_client_secret","flightaware_api_key","mode","track_flight","track_flights","use_bounds","bound_n","bound_s","bound_e","bound_w","show_commercial","show_small_jet","show_light","show_helicopter","show_military","show_unknown","unit_dist","unit_speed","center_lat","center_lon","radius_km","max_aircraft","cycle_sec","refresh_sec","place_style","airline_only","auto_fallback","highlight_special","show_weather","fav_airlines","fav_types","show_clock","clock24h","rainbow","night_mode","night_start","night_end","night_brightness","night_to_clock","clock_date","date_format","rotate_sec","ical_url","hide_no_route","hide_no_logo","text_color","brightness","show_border","show_logos","logo_px"];
+const NUM=["center_lat","center_lon","radius_km","bound_n","bound_s","bound_e","bound_w","max_aircraft","cycle_sec","refresh_sec","brightness","logo_px","night_brightness","rotate_sec"];
+const BOOL=["airline_only","use_bounds","show_commercial","show_small_jet","show_light","show_helicopter","show_military","show_unknown","auto_fallback","highlight_special","show_weather","show_clock","clock24h","rainbow","night_mode","night_to_clock","clock_date","show_border","show_logos","hide_no_route","hide_no_logo"];
 const CREDS=["fr24_token","opensky_client_id","opensky_client_secret","flightaware_api_key"];
 const ROTOPTS=[["nearby","Nearby flights"],["track","Tracked flight"],["clock","Clock"],["world","World clock"],["world4","World clock x4"],["weather","Weather"],["picture","Picture"]];
 $('rotopts').innerHTML=ROTOPTS.map(o=>`<label class=chk><input type=checkbox class=rotcb value="${o[0]}"><span>${o[1]}</span></label>`).join('');
@@ -1562,10 +1648,31 @@ function syncRows(){
   document.querySelectorAll('[src]').forEach(el=>{ el.style.display = el.getAttribute('src')===src ? '' : 'none'; });
   const m=$('mode').value;
   $('trackrow').style.display = m==='track' ? '' : 'none';
+  $('quadrow').style.display = m==='quad' ? '' : 'none';
   $('nearbycard').style.display = m==='nearby' ? '' : 'none';
   $('rotatecard').style.display = m==='rotate' ? '' : 'none';
   $('picturecard').style.display = m==='picture' ? '' : 'none';
+  const ub=$('use_bounds').checked;
+  document.querySelectorAll('[bnd]').forEach(el=>{ el.style.display = ub ? '' : 'none'; });
 }
+async function loadPresets(){
+  try{
+    const d=await (await fetch('/api/presets')).json();
+    const list=d.presets||[];
+    $('presetlist').innerHTML = list.length ? list.map(n=>
+      `<div class=chk style="justify-content:space-between"><span>${n}</span><span>`+
+      `<button type=button class=ghost onclick="applyPreset('${n}')">Apply</button> `+
+      `<button type=button class=ghost onclick="delPreset('${n}')">Delete</button></span></div>`).join('')
+      : '<div class=note>No presets yet.</div>';
+  }catch(e){}
+}
+async function presetPost(action,name){
+  await fetch('/api/presets',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action,name})});
+  loadPresets();
+}
+async function savePreset(){ const n=$('presetname').value.trim(); if(!n)return; await save(); await presetPost('save',n); $('presetname').value=''; }
+async function applyPreset(n){ await presetPost('apply',n); loadSettings(); refresh(); }
+async function delPreset(n){ await presetPost('delete',n); }
 async function loadSettings(){
   const s=await (await fetch('/api/settings')).json();
   FIELDS.forEach(k=>{ const el=$(k); if(!el) return; if(BOOL.includes(k)) el.checked=!!s[k]; else el.value=s[k]; });
@@ -1577,6 +1684,7 @@ async function loadSettings(){
 }
 $('data_source').addEventListener('change',syncRows);
 $('mode').addEventListener('change',syncRows);
+$('use_bounds').addEventListener('change',syncRows);
 async function save(){
   const body={};
   FIELDS.forEach(k=>{ const el=$(k); if(!el) return; let v=BOOL.includes(k)?el.checked:el.value; if(NUM.includes(k)) v=parseFloat(v); body[k]=v; });
@@ -1632,7 +1740,7 @@ async function refresh(){
       : '<div class=empty>No aircraft nearby right now.</div>';
   }catch(e){ $('status').textContent='server unreachable'; }
 }
-loadSettings(); refresh(); setInterval(refresh,3000);
+loadSettings(); refresh(); loadPresets(); setInterval(refresh,3000);
 let lastTouch=0;
 document.addEventListener('input',()=>{ lastTouch=Date.now(); });
 async function syncSettings(){
@@ -1654,7 +1762,7 @@ MANIFEST = json.dumps({
 
 ICON_SVG = ('<svg xmlns="http://www.w3.org/2000/svg" width="180" height="180" viewBox="0 0 180 180">'
             '<rect width="180" height="180" rx="40" fill="#0c0e12"/>'
-            '<path fill="#ff8c00" d="M90 26l9 44 50 30v10l-50-16v34l16 12v8l-25-7-25 7v-8l16-12v-34l-50 16v-10l50-30z"/></svg>')
+            '<path fill="#38BDF8" d="M90 26l9 44 50 30v10l-50-16v34l16 12v8l-25-7-25 7v-8l16-12v-34l-50 16v-10l50-30z"/></svg>')
 
 _icon_png = None
 def icon_bytes():
@@ -1819,15 +1927,22 @@ class Handler(BaseHTTPRequestHandler):
         try:
             n = int(self.headers.get("Content-Length", 0))
             incoming = json.loads(self.rfile.read(n).decode() or "{}")
+            logo_dirty = False
             with _settings_lock:
                 for k in DEFAULTS:
                     if k in incoming and incoming[k] is not None:
                         # don't wipe a stored secret when the field is sent blank
                         if k in CRED_KEYS and incoming[k] == "":
                             continue
-                        _settings[k] = incoming[k]
+                        v = _coerce(k, incoming[k])
+                        if v is None:
+                            continue                     # wrong type: ignore, don't crash
+                        if k in ("logo_px", "show_logos") and _settings.get(k) != v:
+                            logo_dirty = True            # only re-fetch logos when needed
+                        _settings[k] = v
             save_settings()
-            _logo_cache.clear()
+            if logo_dirty:
+                _logo_cache.clear()
             with _data_lock:
                 _version += 1
             _refresh_now.set()
@@ -1837,6 +1952,37 @@ class Handler(BaseHTTPRequestHandler):
 
     def log_message(self, *a):
         pass
+
+
+# Sanity ranges for numeric settings so a bad write can't break the display.
+CLAMPS = {
+    "brightness": (0, 255), "night_brightness": (0, 255), "logo_px": (12, 48),
+    "radius_km": (2, 500), "max_aircraft": (1, 30), "cycle_sec": (2, 120),
+    "refresh_sec": (10, 3600), "rotate_sec": (2, 600),
+    "center_lat": (-90, 90), "center_lon": (-180, 180),
+    "bound_n": (-90, 90), "bound_s": (-90, 90), "bound_e": (-180, 180), "bound_w": (-180, 180),
+}
+
+
+def _coerce(k, v):
+    """Coerce an incoming setting to the type of its default; None = reject."""
+    d = DEFAULTS[k]
+    try:
+        if isinstance(d, bool):
+            return bool(v)
+        if isinstance(d, (int, float)) and not isinstance(d, bool):
+            x = float(v)
+            lo, hi = CLAMPS.get(k, (None, None))
+            if lo is not None:
+                x = max(lo, min(hi, x))
+            return int(x) if isinstance(d, int) else x
+        if isinstance(d, str):
+            return str(v)
+        if isinstance(d, list):
+            return v if isinstance(v, list) else None
+    except (TypeError, ValueError):
+        return None
+    return v
 
 
 def local_ip():
