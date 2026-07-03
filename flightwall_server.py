@@ -1810,7 +1810,7 @@ async function loadLog(){
     const d=await (await fetch('/api/log')).json();
     const el=$('logbox');
     const stick = el.scrollTop + el.clientHeight >= el.scrollHeight - 8;
-    el.textContent=(d.log||[]).join('\n');
+    el.textContent=(d.log||[]).join('\\n');
     if(stick) el.scrollTop=el.scrollHeight;
   }catch(e){}
 }
