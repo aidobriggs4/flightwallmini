@@ -566,6 +566,10 @@ def fr24_get(url):
             body = e.read().decode(errors="replace")[:300]
         except Exception:
             pass
+        # FR24 returns a full HTML maintenance page on 403 during downtime;
+        # don't dump HTML into the log - give a short, clear reason.
+        if "maintenance" in body.lower() or "<!doctype html" in body.lower():
+            raise RuntimeError(f"FR24 is temporarily unavailable (HTTP {e.code}, maintenance)")
         raise RuntimeError(f"HTTP {e.code} from FR24: {body or e.reason}")
 
 
@@ -1135,12 +1139,23 @@ def fetch_data():
         _active_source = src
         return res
     except Exception as e:
-        # auto-fallback to the free OpenSky source if the chosen one fails
-        if get("auto_fallback") and src != "opensky":
-            log(f"{src} FAILED ({e}) -> falling back to OpenSky")
-            res = finalize(table["opensky"](), track=(fetch_mode == "track"))
-            _active_source = "opensky (fallback from " + src + ")"
-            return res
+        if not get("auto_fallback"):
+            raise
+        # Try other configured sources in order before giving up. Prefer a
+        # configured FlightAware (paid, accurate) over free OpenSky.
+        order = []
+        if src != "flightaware" and get("flightaware_api_key").strip():
+            order.append("flightaware")
+        if src != "opensky":
+            order.append("opensky")
+        for alt in order:
+            try:
+                res = finalize(table[alt](), track=(fetch_mode == "track"))
+                _active_source = f"{alt} (fallback from {src})"
+                log(f"{src} FAILED ({e}) -> using {alt}")
+                return res
+            except Exception:
+                continue
         raise
 
 
