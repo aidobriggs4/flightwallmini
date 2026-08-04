@@ -90,6 +90,8 @@ DEFAULTS = {
     "bound_n": 34.2, "bound_s": 33.4, "bound_e": -117.2, "bound_w": -118.2,
     "unit_dist": "km",                # km | mi
     "unit_speed": "mph",              # mph | kmh | kt
+    "world_seconds": True,            # show seconds on the (single) world clock
+    "show_link_dot": True,            # ESP connection dot on the panel
 }
 
 _settings = dict(DEFAULTS)
@@ -1286,15 +1288,17 @@ def world_times():
         try:
             now = datetime.datetime.now(ZoneInfo(zid))
             off = int(now.utcoffset().total_seconds() // 60)
+            ab = now.strftime("%Z")               # real DST-aware code, e.g. PST/PDT/EST
+            if not ab or ab[0] in "+-":            # some zones report numeric -> fall back
+                ab = ZONE_AB.get(zid, zid.split("/")[-1][:3].upper())
         except Exception:
             continue
-        ab = ZONE_AB.get(zid, zid.split("/")[-1][:3].upper())
         hrs = off / 60.0
         sign = "+" if hrs >= 0 else "-"
         ah = abs(hrs)
         gmt = f"{sign}{int(ah)}" if ah == int(ah) else f"{sign}{int(ah)}:{int(round((ah-int(ah))*60)):02d}"
         out.append({"ab": ab, "off": off, "gmt": gmt})
-    return out[:8]
+    return out[:3]
 
 
 def format_date(fmt):
@@ -1454,6 +1458,7 @@ def config_obj():
             "weather": get_weather() if get("show_weather") else "",
             "zones": zones, "forecast": forecast, "cal": cal,
             "spd_u": speed_label(), "dist_u": dist_label(),
+            "wsec": bool(get("world_seconds")), "linkdot": bool(get("show_link_dot")),
             "cycle": int(get("cycle_sec"))}
 
 
