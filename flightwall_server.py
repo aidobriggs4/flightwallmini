@@ -1531,6 +1531,7 @@ hr{border:0;border-top:1px solid var(--line);margin:16px 0}
 
 <div class=panel data-tab=live>
   <div class=card><h2>Live</h2><div id=list><div class=empty>loading...</div></div></div>
+  <div class=card><h2>Hidden today</h2><div id=blocklist><div class=note>none</div></div></div>
 </div>
 
 <div class=panel data-tab=display>
@@ -1577,6 +1578,7 @@ hr{border:0;border-top:1px solid var(--line);margin:16px 0}
   </div>
   <div class=card><h2>World clock zones</h2>
     <select id=world_zones multiple size=8 style="height:auto">__ZONEOPTS__</select>
+    <label class=chk style="margin-top:8px"><input id=world_seconds type=checkbox><span>Show seconds on world clock</span></label>
     <div class=note>Cmd/Ctrl-click for multiple. World x4 uses the first 4.</div>
   </div>
   <div class=card><h2>Weather</h2>
@@ -1598,6 +1600,7 @@ hr{border:0;border-top:1px solid var(--line);margin:16px 0}
   </div>
   <div class=card><h2>Layout</h2>
     <label class=chk><input id=show_border type=checkbox><span>Border around screen</span></label>
+    <label class=chk><input id=show_link_dot type=checkbox><span>Connection dot</span></label>
     <label class=chk><input id=show_logos type=checkbox><span>Airline logos</span></label>
     <div class=note id=logohint></div>
     <div class=field style="margin-top:10px"><label>Logo size (px)</label><input id=logo_px type=number min=12 max=48></div>
@@ -1699,7 +1702,7 @@ hr{border:0;border-top:1px solid var(--line);margin:16px 0}
 const $=id=>document.getElementById(id);
 const FIELDS=["data_source","fr24_token","opensky_client_id","opensky_client_secret","flightaware_api_key","mode","track_flight","track_flights","use_bounds","bound_n","bound_s","bound_e","bound_w","show_commercial","show_small_jet","show_light","show_helicopter","show_military","show_unknown","unit_dist","unit_speed","center_lat","center_lon","radius_km","max_aircraft","cycle_sec","refresh_sec","place_style","airline_only","auto_fallback","highlight_special","show_weather","fav_airlines","fav_types","show_clock","clock24h","rainbow","night_mode","night_start","night_end","night_brightness","night_to_clock","clock_date","date_format","rotate_sec","ical_url","hide_no_route","hide_no_logo","text_color","brightness","show_border","show_logos","logo_px"];
 const NUM=["center_lat","center_lon","radius_km","bound_n","bound_s","bound_e","bound_w","max_aircraft","cycle_sec","refresh_sec","brightness","logo_px","night_brightness","rotate_sec"];
-const BOOL=["airline_only","use_bounds","show_commercial","show_small_jet","show_light","show_helicopter","show_military","show_unknown","auto_fallback","highlight_special","show_weather","show_clock","clock24h","rainbow","night_mode","night_to_clock","clock_date","show_border","show_logos","hide_no_route","hide_no_logo"];
+const BOOL=["airline_only","world_seconds","show_link_dot","use_bounds","show_commercial","show_small_jet","show_light","show_helicopter","show_military","show_unknown","auto_fallback","highlight_special","show_weather","show_clock","clock24h","rainbow","night_mode","night_to_clock","clock_date","show_border","show_logos","hide_no_route","hide_no_logo"];
 const CREDS=["fr24_token","opensky_client_id","opensky_client_secret","flightaware_api_key"];
 const ROTOPTS=[["nearby","Nearby flights"],["track","Tracked flight"],["clock","Clock"],["world","World clock"],["world4","World clock x4"],["weather","Weather"],["picture","Picture"]];
 $('rotopts').innerHTML=ROTOPTS.map(o=>`<label class=chk><input type=checkbox class=rotcb value="${o[0]}"><span>${o[1]}</span></label>`).join('');
@@ -1775,6 +1778,27 @@ function trackerView(a){
     <div class=meta><span>${a.status||''}</span><span>${a.progress||0}%</span><span>ETA ${eta}</span></div>
     <div class=meta style="margin-top:8px"><span>${a.type||''}</span><span>${a.alt}ft</span><span>${a.spd}mph</span></div></div>`;
 }
+async function loadBlocked(){
+  try{
+    const d=await (await fetch('/api/blocked')).json();
+    const el=$('blocklist'); const b=d.blocked||[];
+    el.innerHTML='';
+    if(!b.length){ el.innerHTML='<div class=note>none</div>'; return; }
+    b.forEach(function(cs){
+      const row=document.createElement('div');
+      row.className='chk'; row.style.justifyContent='space-between';
+      const name=document.createElement('span'); name.textContent=cs;
+      const btn=document.createElement('button');
+      btn.type='button'; btn.className='ghost'; btn.textContent='Unhide';
+      btn.addEventListener('click', function(){ unblock(cs); });
+      row.appendChild(name); row.appendChild(btn); el.appendChild(row);
+    });
+  }catch(e){}
+}
+async function unblock(cs){
+  await fetch('/api/blocked',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'remove',cs:cs})});
+  loadBlocked();
+}
 async function refresh(){
   try{
     const d=await (await fetch('/api/status')).json();
@@ -1820,7 +1844,7 @@ async function loadLog(){
     if(stick) el.scrollTop=el.scrollHeight;
   }catch(e){}
 }
-loadSettings(); refresh(); loadPresets(); loadLog();
+loadSettings(); refresh(); loadPresets(); loadLog(); loadBlocked();
 setInterval(refresh,3000); setInterval(loadLog,5000);
 let lastTouch=0;
 document.addEventListener('input',()=>{ lastTouch=Date.now(); });
